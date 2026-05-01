@@ -66,6 +66,9 @@ export interface Read extends Release {
   // want to FrozenJSONValue to be part of our public API. Our implementations
   // really return FrozenJSONValue but it is not required by the interface.
   get(key: string): Promise<ReadonlyJSONValue | undefined>;
+  // Optional batch read. Returns values in the same order as keys.
+  // If not implemented, callers should fall back to individual get() calls.
+  getMany?(keys: string[]): Promise<(ReadonlyJSONValue | undefined)[]>;
   closed: boolean;
 }
 
@@ -76,5 +79,42 @@ export interface Read extends Release {
 export interface Write extends Read {
   put(key: string, value: ReadonlyJSONValue): Promise<void>;
   del(key: string): Promise<void>;
+  // Optional batch write. If not implemented, callers should fall back to
+  // individual put() calls.
+  putMany?(entries: Iterable<[string, ReadonlyJSONValue]>): Promise<void>;
   commit(): Promise<void>;
+}
+
+/**
+ * Reads multiple keys from a {@link Read} transaction, using the optional
+ * {@link Read.getMany} batch method when available and falling back to
+ * individual {@link Read.get} calls otherwise.
+ *
+ * Returns values in the same order as `keys`.
+ */
+export function getMany(
+  read: Read,
+  keys: string[],
+): Promise<(ReadonlyJSONValue | undefined)[]> {
+  if (read.getMany) {
+    return read.getMany(keys);
+  }
+  return Promise.all(keys.map(k => read.get(k)));
+}
+
+/**
+ * Writes multiple entries to a {@link Write} transaction, using the optional
+ * {@link Write.putMany} batch method when available and falling back to
+ * sequential {@link Write.put} calls otherwise.
+ */
+export async function putMany(
+  write: Write,
+  entries: Iterable<[string, ReadonlyJSONValue]>,
+): Promise<void> {
+  if (write.putMany) {
+    return write.putMany(entries);
+  }
+  for (const [key, value] of entries) {
+    await write.put(key, value);
+  }
 }

@@ -83,4 +83,16 @@ class ZeroSQLiteDatabase implements SQLiteDatabase {
   execSync(sql: string): void {
     this.#db.exec(sql);
   }
+
+  // oxlint-disable-next-line require-await
+  async executeForRows(
+    sql: string,
+    params: string[],
+  ): Promise<[string, string][]> {
+    const rows = this.#db.prepare(sql).all(...params) as Record<
+      string,
+      unknown
+    >[];
+    return rows.map(row => Object.values(row) as [string, string]);
+  }
 }

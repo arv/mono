@@ -38,6 +38,15 @@ export interface SQLiteDatabase {
 
   // for PRAGMA statements, schema creation and transaction control.
   execSync(sql: string): void;
+
+  /**
+   * Execute an ad-hoc SQL query and return all result rows as `[col0, col1]`
+   * pairs. Implementing this enables the batch {@link SQLiteStoreRead.getMany}
+   * optimisation, which issues a single `SELECT … IN (…)` instead of one
+   * round-trip per key. If omitted the implementation falls back to sequential
+   * {@link PreparedStatement.firstValue} calls.
+   */
+  executeForRows?(sql: string, params: string[]): Promise<[string, string][]>;
 }
 
 export type CreateSQLiteDatabase = (
@@ -87,7 +96,7 @@ export class SQLiteStore implements Store {
         db.execSync('COMMIT');
       }
       release();
-    }, preparedStatements);
+    }, preparedStatements, db);
   }
 
   async write(): Promise<Write> {
@@ -181,14 +190,48 @@ export function setupDatabase(
   };
 }
 
+/**
+ * Fetch multiple keys in a single `SELECT … IN (…)` query when the database
+ * supports {@link SQLiteDatabase.executeForRows}. Falls back to sequential
+ * individual gets otherwise.
+ */
+async function sqliteBatchGet(
+  db: SQLiteDatabase,
+  keys: string[],
+  getFallback: (key: string) => Promise<ReadonlyJSONValue | undefined>,
+): Promise<(ReadonlyJSONValue | undefined)[]> {
+  if (keys.length === 0) {
+    return [];
+  }
+  if (!db.executeForRows) {
+    return Promise.all(keys.map(getFallback));
+  }
+  const placeholders = keys.map(() => '?').join(',');
+  const rows = await db.executeForRows(
+    `SELECT key, value FROM entry WHERE key IN (${placeholders})`,
+    keys,
+  );
+  const resultMap = new Map<string, ReadonlyJSONValue>();
+  for (const [key, jsonValue] of rows) {
+    resultMap.set(key, deepFreeze(JSON.parse(jsonValue)));
+  }
+  return keys.map(k => resultMap.get(k));
+}
+
 export class SQLiteStoreRead implements Read {
   #release: () => void;
   #closed = false;
   #preparedStatements: PreparedStatements;
+  #db: SQLiteDatabase;
 
-  constructor(release: () => void, preparedStatements: PreparedStatements) {
+  constructor(
+    release: () => void,
+    preparedStatements: PreparedStatements,
+    db: SQLiteDatabase,
+  ) {
     this.#release = release;
     this.#preparedStatements = preparedStatements;
+    this.#db = db;
   }
 
   async has(key: string): Promise<boolean> {
@@ -206,6 +249,11 @@ export class SQLiteStoreRead implements Read {
 
     const parsedValue = JSON.parse(value as string) as ReadonlyJSONValue;
     return deepFreeze(parsedValue);
+  }
+
+  async getMany(keys: string[]): Promise<(ReadonlyJSONValue | undefined)[]> {
+    throwIfTransactionClosed(this);
+    return sqliteBatchGet(this.#db, keys, k => this.get(k));
   }
 
   release(): void {
@@ -254,9 +302,27 @@ export class SQLiteWrite implements Write {
     return deepFreeze(parsedValue);
   }
 
+  async getMany(keys: string[]): Promise<(ReadonlyJSONValue | undefined)[]> {
+    throwIfTransactionClosed(this);
+    return sqliteBatchGet(this.#dbDelegate, keys, k => this.get(k));
+  }
+
   async put(key: string, value: ReadonlyJSONValue): Promise<void> {
     throwIfTransactionClosed(this);
     await this.#preparedStatements.put.exec([key, JSON.stringify(value)]);
+  }
+
+  async putMany(
+    entries: Iterable<[string, ReadonlyJSONValue]>,
+  ): Promise<void> {
+    throwIfTransactionClosed(this);
+    // Fire all bridge calls concurrently; SQLite serialises them within the
+    // open transaction so the result is identical to sequential puts.
+    await Promise.all(
+      Array.from(entries, ([key, value]) =>
+        this.#preparedStatements.put.exec([key, JSON.stringify(value)]),
+      ),
+    );
   }
 
   async del(key: string): Promise<void> {

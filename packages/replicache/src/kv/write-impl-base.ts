@@ -58,6 +58,39 @@ export class WriteImplBase {
     }
   }
 
+  async getMany(keys: string[]): Promise<(FrozenJSONValue | undefined)[]> {
+    if (this.#read.closed) {
+      return transactionIsClosedRejection();
+    }
+
+    const results: (FrozenJSONValue | undefined)[] = new Array(keys.length);
+    const missIndices: number[] = [];
+    const missKeys: string[] = [];
+
+    for (let i = 0; i < keys.length; i++) {
+      const v = this._pending.get(keys[i]);
+      if (v === deleteSentinel) {
+        results[i] = undefined;
+      } else if (v !== undefined) {
+        results[i] = v;
+      } else {
+        missIndices.push(i);
+        missKeys.push(keys[i]);
+      }
+    }
+
+    if (missKeys.length > 0) {
+      const fetched = this.#read.getMany
+        ? await this.#read.getMany(missKeys)
+        : await Promise.all(missKeys.map(k => this.#read.get(k)));
+      for (let i = 0; i < missIndices.length; i++) {
+        results[missIndices[i]] = deepFreezeAllowUndefined(fetched[i]);
+      }
+    }
+
+    return results;
+  }
+
   put(key: string, value: ReadonlyJSONValue) {
     return (
       maybeTransactionIsClosedRejection(this.#read) ??

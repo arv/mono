@@ -81,4 +81,20 @@ class ExpoSQLiteDatabase implements SQLiteDatabase {
   execSync(sql: string): void {
     this.#db.execSync(sql);
   }
+
+  async executeForRows(
+    sql: string,
+    params: string[],
+  ): Promise<[string, string][]> {
+    // Prepare, execute, and immediately finalize a one-shot statement so we
+    // don't keep a permanent prepared statement for every unique IN-clause size.
+    const stmt = this.#db.prepareSync(sql);
+    try {
+      const result = await stmt.executeForRawResultAsync(params);
+      const rows = await result.getAllAsync();
+      return rows as unknown as [string, string][];
+    } finally {
+      stmt.finalizeSync();
+    }
+  }
 }

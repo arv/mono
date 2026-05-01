@@ -141,6 +141,14 @@ class ReadImpl implements Read {
     });
   }
 
+  getMany(keys: string[]): Promise<(FrozenJSONValue | undefined)[]> {
+    if (this.#closed) {
+      return transactionIsClosedRejection();
+    }
+    // Fire all IDB requests within the same transaction concurrently.
+    return Promise.all(keys.map(k => this.get(k)));
+  }
+
   release(): void {
     this.#closed = true;
     // Do nothing. We rely on IDB locking.

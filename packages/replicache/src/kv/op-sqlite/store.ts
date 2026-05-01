@@ -104,4 +104,12 @@ class OpSQLiteDatabase implements SQLiteDatabase {
   execSync(sql: string): void {
     this.#db.executeRawSync(sql, []);
   }
+
+  async executeForRows(
+    sql: string,
+    params: string[],
+  ): Promise<[string, string][]> {
+    const rows = await this.#db.executeRaw(sql, params);
+    return rows as [string, string][];
+  }
 }

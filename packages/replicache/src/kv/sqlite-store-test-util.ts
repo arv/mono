@@ -2,6 +2,7 @@ import {afterEach, beforeEach, expect, test} from 'vitest';
 import {sleep} from '../../../shared/src/sleep.ts';
 import {withRead, withWrite} from '../with-transactions.ts';
 import {runAll} from './store-test-util.ts';
+import {getMany, putMany} from './store.ts';
 import type {Store, StoreProvider} from './store.ts';
 
 export interface SQLiteStoreTestConfig<TOptions = unknown> {
@@ -296,5 +297,67 @@ export function runSQLiteStoreTests<TOptions = unknown>(
     });
 
     await storeWithOptions.close();
+  });
+
+  test('getMany returns values in key order, undefined for misses', async () => {
+    const store = createStoreWithDefaults(`getMany-test-${++storeCounter}`);
+
+    await withWrite(store, async wt => {
+      await wt.put('k1', 'v1');
+      await wt.put('k2', 'v2');
+      await wt.put('k3', 'v3');
+    });
+
+    await withRead(store, async rt => {
+      const results = await getMany(rt, ['k3', 'missing', 'k1', 'k2']);
+      expect(results).toEqual(['v3', undefined, 'v1', 'v2']);
+    });
+
+    // Empty keys case
+    await withRead(store, async rt => {
+      expect(await getMany(rt, [])).toEqual([]);
+    });
+
+    await store.close();
+  });
+
+  test('putMany writes all entries atomically', async () => {
+    const store = createStoreWithDefaults(`putMany-test-${++storeCounter}`);
+    const entries: [string, string][] = Array.from({length: 50}, (_, i) => [
+      `key${i}`,
+      `val${i}`,
+    ]);
+
+    await withWrite(store, async wt => {
+      await putMany(wt, entries);
+    });
+
+    await withRead(store, async rt => {
+      for (const [key, val] of entries) {
+        expect(await rt.get(key)).toBe(val);
+      }
+    });
+
+    await store.close();
+  });
+
+  test('getMany in write transaction sees pending puts', async () => {
+    const store = createStoreWithDefaults(
+      `getMany-write-test-${++storeCounter}`,
+    );
+
+    await withWrite(store, async wt => {
+      await wt.put('existing', 'old');
+    });
+
+    await withWrite(store, async wt => {
+      await wt.put('existing', 'new');
+      await wt.put('fresh', 'value');
+
+      const results = await getMany(wt, ['existing', 'fresh', 'gone']);
+      expect(results).toEqual(['new', 'value', undefined]);
+    });
+
+    await store.close();
   });
 }

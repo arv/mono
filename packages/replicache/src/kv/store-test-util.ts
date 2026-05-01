@@ -7,6 +7,7 @@ import {
   withWrite,
   withWriteNoImplicitCommit,
 } from '../with-transactions.ts';
+import {getMany, putMany} from './store.ts';
 import type {Read, Store, Write} from './store.ts';
 
 class TestStore implements Store {
@@ -78,6 +79,12 @@ export function runAll(
     multipleStoresWithDifferentNamesHaveSeparateData,
     errorHandlingForClosedStore,
     errorHandlingForClosedTransactions,
+    getManyBasic,
+    getManyEmpty,
+    getManyMissingKeys,
+    getManyInWriteTransaction,
+    putManyBasic,
+    putManyFallback,
   ];
 
   for (const f of funcs) {
@@ -533,4 +540,93 @@ async function errorHandlingForClosedStore(store: TestStore): Promise<void> {
   // - IndexedDB: varies by browser (e.g., "The database connection is closing", etc.)
   await expect(store.read()).rejects.toThrow();
   await expect(store.write()).rejects.toThrow();
+}
+
+async function getManyBasic(store: TestStore): Promise<void> {
+  await withWrite(store, async wt => {
+    await wt.put('a', 1);
+    await wt.put('b', 2);
+    await wt.put('c', 3);
+  });
+
+  await withRead(store, async rt => {
+    const results = await getMany(rt, ['a', 'b', 'c']);
+    expect(results).toEqual([1, 2, 3]);
+  });
+}
+
+async function getManyEmpty(store: TestStore): Promise<void> {
+  await withRead(store, async rt => {
+    const results = await getMany(rt, []);
+    expect(results).toEqual([]);
+  });
+}
+
+async function getManyMissingKeys(store: TestStore): Promise<void> {
+  await withWrite(store, async wt => {
+    await wt.put('exists', 'yes');
+  });
+
+  await withRead(store, async rt => {
+    const results = await getMany(rt, ['missing', 'exists', 'also-missing']);
+    expect(results).toEqual([undefined, 'yes', undefined]);
+  });
+}
+
+async function getManyInWriteTransaction(store: TestStore): Promise<void> {
+  await withWrite(store, async wt => {
+    await wt.put('before', 'old');
+  });
+
+  await withWrite(store, async wt => {
+    await wt.put('before', 'new');
+    await wt.put('during', 'added');
+
+    const results = await getMany(wt, ['before', 'during', 'never']);
+    expect(results).toEqual(['new', 'added', undefined]);
+  });
+}
+
+async function putManyBasic(store: TestStore): Promise<void> {
+  await withWrite(store, async wt => {
+    await putMany(wt, [
+      ['x', 10],
+      ['y', 20],
+      ['z', 30],
+    ]);
+  });
+
+  await withRead(store, async rt => {
+    expect(await rt.get('x')).toBe(10);
+    expect(await rt.get('y')).toBe(20);
+    expect(await rt.get('z')).toBe(30);
+  });
+}
+
+async function putManyFallback(store: TestStore): Promise<void> {
+  // Verify putMany works even on Write implementations that don't define it by
+  // testing via the standalone helper (which falls back to sequential puts).
+  await withWrite(store, async wt => {
+    // Strip the optional putMany so the helper takes the fallback path.
+    const writeWithoutBatch: Write = {
+      has: wt.has.bind(wt),
+      get: wt.get.bind(wt),
+      put: wt.put.bind(wt),
+      del: wt.del.bind(wt),
+      commit: wt.commit.bind(wt),
+      release: wt.release.bind(wt),
+      get closed() {
+        return wt.closed;
+      },
+    };
+    await putMany(writeWithoutBatch, [
+      ['p', 'pp'],
+      ['q', 'qq'],
+    ]);
+  });
+
+  await withRead(store, async rt => {
+    expect(await rt.get('p')).toBe('pp');
+    expect(await rt.get('q')).toBe('qq');
+  });
 }
