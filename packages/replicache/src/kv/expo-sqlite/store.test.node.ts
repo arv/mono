@@ -50,18 +50,19 @@ vi.mock('expo-sqlite', () => ({
               const isSelectQuery = /^\s*select/i.test(sql);
               if (isSelectQuery) {
                 const result = stmt.all(...params);
+                const rawRows = result.map(r =>
+                  Object.values(r as Record<string, unknown>),
+                );
                 return Promise.resolve({
                   getFirstAsync: () =>
-                    Promise.resolve(
-                      result.length > 0
-                        ? Object.values(result[0] as Record<string, unknown>)
-                        : null,
-                    ),
+                    Promise.resolve(rawRows.length > 0 ? rawRows[0] : null),
+                  getAllAsync: () => Promise.resolve(rawRows),
                 });
               }
               stmt.run(...params);
               return Promise.resolve({
                 getFirstAsync: () => Promise.resolve(null),
+                getAllAsync: () => Promise.resolve([]),
               });
             } catch (error) {
               return Promise.reject(error);

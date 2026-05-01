@@ -29,7 +29,7 @@ import type {
   SQLiteDatabase,
   SQLiteStoreOptions,
 } from './sqlite-store.ts';
-import {SQLiteStore, safeFilename} from './sqlite-store.ts';
+import {SQLiteStore} from './sqlite-store.ts';
 import type {Read, Store, Write} from './store.ts';
 import {getMany, putMany} from './store.ts';
 
@@ -297,7 +297,7 @@ async function runSuite(
 
 console.log('\n=== React Native KV store batch-ops benchmark ===');
 console.log(
-  'Using zero-sqlite3 with Promise wrappers that mirror each library\'s\n' +
+  "Using zero-sqlite3 with Promise wrappers that mirror each library's\n" +
     'async call structure.  "Bridge hops" = how many async awaits each\n' +
     'operation requires; on real devices each hop costs ~0.5–2 ms extra.\n',
 );

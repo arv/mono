@@ -89,14 +89,18 @@ export class SQLiteStore implements Store {
     }
     entry.activeReaders++;
 
-    return new SQLiteStoreRead(() => {
-      entry.activeReaders--;
-      // Commit shared read transaction when last reader finishes
-      if (entry.activeReaders === 0) {
-        db.execSync('COMMIT');
-      }
-      release();
-    }, preparedStatements, db);
+    return new SQLiteStoreRead(
+      () => {
+        entry.activeReaders--;
+        // Commit shared read transaction when last reader finishes
+        if (entry.activeReaders === 0) {
+          db.execSync('COMMIT');
+        }
+        release();
+      },
+      preparedStatements,
+      db,
+    );
   }
 
   async write(): Promise<Write> {
@@ -312,9 +316,7 @@ export class SQLiteWrite implements Write {
     await this.#preparedStatements.put.exec([key, JSON.stringify(value)]);
   }
 
-  async putMany(
-    entries: Iterable<[string, ReadonlyJSONValue]>,
-  ): Promise<void> {
+  async putMany(entries: Iterable<[string, ReadonlyJSONValue]>): Promise<void> {
     throwIfTransactionClosed(this);
     // Fire all bridge calls concurrently; SQLite serialises them within the
     // open transaction so the result is identical to sequential puts.

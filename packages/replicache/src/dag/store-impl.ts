@@ -6,6 +6,7 @@ import type {
   Store as KVStore,
   Write as KVWrite,
 } from '../kv/store.ts';
+import {getMany, putMany} from '../kv/store.ts';
 import {
   Chunk,
   type ChunkHasher,
@@ -63,12 +64,13 @@ export class ReadImpl implements Read {
   }
 
   async getChunk(hash: Hash): Promise<Chunk | undefined> {
-    const data = await this._tx.get(chunkDataKey(hash));
+    const [data, refsVal] = await getMany(this._tx, [
+      chunkDataKey(hash),
+      chunkMetaKey(hash),
+    ]);
     if (data === undefined) {
       return undefined;
     }
-
-    const refsVal = await this._tx.get(chunkMetaKey(hash));
     let refs: Refs;
     if (refsVal !== undefined) {
       assertRefs(refsVal);
@@ -136,19 +138,18 @@ export class WriteImpl
     const {hash, data, meta} = c;
     // We never want to write temp hashes to the underlying store.
     this.assertValidHash(hash);
-    const key = chunkDataKey(hash);
+    this.#putChunks.add(hash);
     // Commit contains InternalValue and Hash which are opaque types.
-    const p1 = this._tx.put(key, data as ReadonlyJSONValue);
-    let p2;
+    const entries: [string, ReadonlyJSONValue][] = [
+      [chunkDataKey(hash), data as ReadonlyJSONValue],
+    ];
     if (meta.length > 0) {
       for (const h of meta) {
         this.assertValidHash(h);
       }
-      p2 = this._tx.put(chunkMetaKey(hash), meta);
+      entries.push([chunkMetaKey(hash), meta]);
     }
-    this.#putChunks.add(hash);
-    await p1;
-    await p2;
+    await putMany(this._tx, entries);
   }
 
   setHead(name: string, hash: Hash): Promise<void> {

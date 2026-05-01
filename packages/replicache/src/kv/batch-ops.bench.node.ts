@@ -52,9 +52,7 @@ function header(title: string) {
   console.log(`\n${'─'.repeat(76)}`);
   console.log(`  ${title}`);
   console.log('─'.repeat(76));
-  console.log(
-    `  ${'benchmark'.padEnd(42)} ${'ops/s'.padStart(9)}  latency`,
-  );
+  console.log(`  ${'benchmark'.padEnd(42)} ${'ops/s'.padStart(9)}  latency`);
   console.log('─'.repeat(76));
 }
 
