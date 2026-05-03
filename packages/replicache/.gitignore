@@ -9,3 +9,6 @@ perf/index.js
 tool/bump/bump
 .vscode/launch.json
 src/kv/*.db*
+# SQLite WAL-mode sidecar files left by tests (no .db extension)
+*-shm
+*-wal
