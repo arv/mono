@@ -8,9 +8,7 @@
  *   npm --workspace=replicache run bench
  */
 
-import {tmpdir} from 'node:os';
-import {join} from 'node:path';
-import {bench, describe} from 'vitest';
+import {afterAll, bench, describe} from 'vitest';
 import {deepFreeze} from '../frozen-json.ts';
 import {assertHash, makeNewFakeHashFunction} from '../hash.ts';
 import {withRead, withWrite} from '../with-transactions.ts';
@@ -23,6 +21,22 @@ import {
 import {zeroSQLiteStoreProvider} from '../kv/zero-sqlite/store.ts';
 
 const chunkHasher = makeNewFakeHashFunction();
+const provider = zeroSQLiteStoreProvider();
+
+// All store names created during the benchmark run; dropped in afterAll.
+const createdStores: string[] = [];
+
+let storeSeq = 0;
+
+function makeStoreName() {
+  const name = `bench_chunk_io_${++storeSeq}`;
+  createdStores.push(name);
+  return name;
+}
+
+afterAll(async () => {
+  await Promise.allSettled(createdStores.map(n => provider.drop(n)));
+});
 
 function makeChunks(n: number) {
   const chunks = [];
@@ -38,25 +52,20 @@ function makeChunks(n: number) {
   return chunks;
 }
 
-let storeSeq = 0;
-
 function makeStore() {
-  const name = join(tmpdir(), `rpl_bench_${++storeSeq}_${Date.now()}`);
-  const kv = zeroSQLiteStoreProvider().create(name);
+  const kv = provider.create(makeStoreName());
   return new StoreImpl(kv as never, chunkHasher, assertHash);
 }
 
 for (const n of [10, 50]) {
   describe(`dag chunk reads — ${n} chunks`, () => {
-    // Seed store once; both read benches share it.
+    // Seed once; both read benches share the same store.
     const store = makeStore();
     const chunks = makeChunks(n);
 
-    void (async () => {
-      await withWrite(store, async w => {
-        await putManyChunksHelper(w, chunks);
-      });
-    })();
+    void withWrite(store, async w => {
+      await putManyChunksHelper(w, chunks);
+    });
 
     bench(`before: Promise.all getChunk×${n}`, async () => {
       await withRead(store, async r => {

@@ -12,3 +12,6 @@ src/kv/*.db*
 # SQLite WAL-mode sidecar files left by tests (no .db extension)
 *-shm
 *-wal
+# SQLite DB files left by benchmarks / tests (no .db extension)
+bench_chunk_io_*
+zero_*_test_*
