@@ -27,6 +27,16 @@ export interface Read extends GetChunk, MustGetChunk, Release {
    * round-trip per chunk). Falls back to concurrent {@link getChunk} calls.
    */
   getManyChunks?(hashes: readonly Hash[]): Promise<(Chunk | undefined)[]>;
+  /**
+   * True only when {@link getManyChunks} reduces the number of underlying
+   * storage round-trips to 1 (e.g. SQLite `SELECT … IN (…)`).
+   *
+   * Stores like IDB implement {@link getManyChunks} as `Promise.all` of N
+   * individual requests — concurrent but not fewer. Setting this flag on those
+   * stores would enable speculative prefetching that floods the store with
+   * extra requests and regresses performance.
+   */
+  readonly supportsBulkPrefetch?: true | undefined;
 }
 
 /**

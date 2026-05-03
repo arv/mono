@@ -11,7 +11,13 @@ import {
   type RefCountUpdatesDelegate,
   computeRefCountUpdates,
 } from './gc.ts';
-import {type Read, type Store, type Write, mustGetChunk} from './store.ts';
+import {
+  type Read,
+  type Store,
+  type Write,
+  getManyChunks as getManyChunksFromRead,
+  mustGetChunk,
+} from './store.ts';
 
 /**
  * Dag Store which lazily loads values from a source store and then caches
@@ -270,6 +276,44 @@ export class LazyRead implements Read {
     return mustGetChunk(this, hash);
   }
 
+  async getManyChunks(
+    hashes: readonly Hash[],
+  ): Promise<(Chunk | undefined)[]> {
+    const result: (Chunk | undefined)[] = new Array(hashes.length);
+    const missIndices: number[] = [];
+    const missHashes: Hash[] = [];
+
+    for (let i = 0; i < hashes.length; i++) {
+      const hash = hashes[i];
+      const memOnly = this._memOnlyChunks.get(hash);
+      if (memOnly !== undefined) {
+        result[i] = memOnly;
+        continue;
+      }
+      const cached = this._sourceChunksCache.get(hash);
+      if (cached !== undefined) {
+        result[i] = cached;
+        continue;
+      }
+      missIndices.push(i);
+      missHashes.push(hash);
+    }
+
+    if (missHashes.length > 0) {
+      const sourceRead = await this._getSourceRead();
+      const fetched = await getManyChunksFromRead(sourceRead, missHashes);
+      for (let i = 0; i < missIndices.length; i++) {
+        const chunk = fetched[i];
+        result[missIndices[i]] = chunk;
+        if (chunk !== undefined) {
+          this._sourceChunksCache.put(chunk);
+        }
+      }
+    }
+
+    return result;
+  }
+
   getHead(name: string): Promise<Hash | undefined> {
     return Promise.resolve(this._heads.get(name));
   }
@@ -344,6 +388,61 @@ export class LazyWrite
     this.#createdChunks.add(chunk.hash);
     return chunk;
   };
+
+  override async getManyChunks(
+    hashes: readonly Hash[],
+  ): Promise<(Chunk | undefined)[]> {
+    const result: (Chunk | undefined)[] = new Array(hashes.length);
+    const missIndices: number[] = [];
+    const missHashes: Hash[] = [];
+
+    for (let i = 0; i < hashes.length; i++) {
+      const hash = hashes[i];
+      const pendingMemOnly = this._pendingMemOnlyChunks.get(hash);
+      if (pendingMemOnly !== undefined) {
+        result[i] = pendingMemOnly;
+        continue;
+      }
+      const memOnly = this._memOnlyChunks.get(hash);
+      if (memOnly !== undefined) {
+        result[i] = memOnly;
+        continue;
+      }
+      const pendingCached = this._pendingCachedChunks.get(hash);
+      if (pendingCached !== undefined) {
+        result[i] = pendingCached.chunk;
+        continue;
+      }
+      const cached = this._sourceChunksCache.get(hash);
+      if (cached !== undefined) {
+        result[i] = cached;
+        continue;
+      }
+      missIndices.push(i);
+      missHashes.push(hash);
+    }
+
+    if (missHashes.length > 0) {
+      const sourceRead = await this._getSourceRead();
+      const fetched = await getManyChunksFromRead(sourceRead, missHashes);
+      for (let i = 0; i < missIndices.length; i++) {
+        const chunk = fetched[i];
+        result[missIndices[i]] = chunk;
+        if (chunk !== undefined) {
+          this._pendingCachedChunks.set(chunk.hash, {chunk, size: -1});
+        }
+      }
+    }
+
+    return result;
+  }
+
+  putManyChunks(chunks: readonly Chunk[]): Promise<void> {
+    for (const c of chunks) {
+      this.putChunk(c);
+    }
+    return promiseVoid;
+  }
 
   putChunk<V>(c: Chunk<V>, size?: number): Promise<void> {
     const {hash, meta} = c;

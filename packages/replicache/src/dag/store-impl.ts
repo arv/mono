@@ -53,6 +53,7 @@ export class StoreImpl implements Store {
 export class ReadImpl implements Read {
   protected readonly _tx: KVRead;
   readonly assertValidHash: (hash: Hash) => void;
+  readonly supportsBulkPrefetch = true as const;
 
   constructor(kv: KVRead, assertValidHash: (hash: Hash) => void) {
     this._tx = kv;
