@@ -60,7 +60,7 @@ export class BTreeRead implements AsyncIterable<Entry<FrozenJSONValue>> {
 
   // Deduplicates concurrent getNode calls for the same hash so only one
   // underlying chunk fetch is issued.
-  private readonly _inflight: Map<
+  readonly #inflight: Map<
     Hash,
     Promise<DataNodeImpl | InternalNodeImpl>
   > = new Map();
@@ -93,17 +93,17 @@ export class BTreeRead implements AsyncIterable<Entry<FrozenJSONValue>> {
     if (cached) {
       return cached;
     }
-    const inflight = this._inflight.get(hash);
+    const inflight = this.#inflight.get(hash);
     if (inflight) {
       return inflight;
     }
-    const p = this._loadNode(hash);
-    this._inflight.set(hash, p);
-    void p.finally(() => this._inflight.delete(hash));
+    const p = this.#loadNode(hash);
+    this.#inflight.set(hash, p);
+    void p.finally(() => this.#inflight.delete(hash));
     return p;
   }
 
-  private async _loadNode(
+  async #loadNode(
     hash: Hash,
   ): Promise<DataNodeImpl | InternalNodeImpl> {
     const chunk = await this._dagRead.mustGetChunk(hash);
@@ -112,14 +112,14 @@ export class BTreeRead implements AsyncIterable<Entry<FrozenJSONValue>> {
     // Speculatively batch-fetch all children of internal nodes so that a
     // subsequent traversal step hits the cache rather than the KV store.
     if (!isDataNodeImpl(impl)) {
-      this._prefetchChildren(impl.entries.map(([, h]) => h as Hash));
+      this.#prefetchChildren(impl.entries.map(([, h]) => h as Hash));
     }
     return impl;
   }
 
-  private _prefetchChildren(hashes: readonly Hash[]): void {
+  #prefetchChildren(hashes: readonly Hash[]): void {
     const toFetch = hashes.filter(
-      h => h !== emptyHash && !this._cache.has(h) && !this._inflight.has(h),
+      h => h !== emptyHash && !this._cache.has(h) && !this.#inflight.has(h),
     );
     if (toFetch.length === 0) return;
     void getManyChunks(this._dagRead, toFetch)
