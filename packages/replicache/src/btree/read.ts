@@ -118,6 +118,10 @@ export class BTreeRead implements AsyncIterable<Entry<FrozenJSONValue>> {
   }
 
   #prefetchChildren(hashes: readonly Hash[]): void {
+    // Only prefetch when the store supports batch reads (getManyChunks). Without
+    // it each hash becomes a separate async request (e.g. two IDB round-trips),
+    // which keeps the current transaction alive longer and regresses perf.
+    if (!this._dagRead.getManyChunks) return;
     const toFetch = hashes.filter(
       h => h !== emptyHash && !this._cache.has(h) && !this.#inflight.has(h),
     );
