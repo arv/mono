@@ -47,6 +47,18 @@ export interface SQLiteDatabase {
    * {@link PreparedStatement.firstValue} calls.
    */
   executeForRows?(sql: string, params: string[]): Promise<[string, string][]>;
+
+  /**
+   * Insert or replace multiple rows in a single SQL statement.
+   * Implementing this enables {@link SQLiteWrite.putMany} to issue one
+   * `INSERT OR REPLACE INTO entry (key, value) VALUES (?,?),(?,?),...`
+   * instead of one bridge crossing per entry. If omitted the implementation
+   * falls back to concurrent {@link PreparedStatement.exec} calls.
+   *
+   * SQLite's default variable limit is 999; each row uses 2 params, so
+   * callers should not exceed ~499 entries per call.
+   */
+  insertManyRows?(entries: [string, string][]): Promise<void>;
 }
 
 export type CreateSQLiteDatabase = (
@@ -318,12 +330,18 @@ export class SQLiteWrite implements Write {
 
   async putMany(entries: Iterable<[string, ReadonlyJSONValue]>): Promise<void> {
     throwIfTransactionClosed(this);
-    // Fire all bridge calls concurrently; SQLite serialises them within the
-    // open transaction so the result is identical to sequential puts.
+    const rows = Array.from(
+      entries,
+      ([k, v]) => [k, JSON.stringify(v)] as [string, string],
+    );
+    if (rows.length === 0) return;
+    if (this.#dbDelegate.insertManyRows) {
+      await this.#dbDelegate.insertManyRows(rows);
+      return;
+    }
+    // Fall back to concurrent individual exec calls.
     await Promise.all(
-      Array.from(entries, ([key, value]) =>
-        this.#preparedStatements.put.exec([key, JSON.stringify(value)]),
-      ),
+      rows.map(([k, v]) => this.#preparedStatements.put.exec([k, v])),
     );
   }
 

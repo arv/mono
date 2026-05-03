@@ -97,4 +97,17 @@ class ExpoSQLiteDatabase implements SQLiteDatabase {
       stmt.finalizeSync();
     }
   }
+
+  async insertManyRows(entries: [string, string][]): Promise<void> {
+    if (entries.length === 0) return;
+    const placeholders = entries.map(() => '(?, ?)').join(', ');
+    const stmt = this.#db.prepareSync(
+      `INSERT OR REPLACE INTO entry (key, value) VALUES ${placeholders}`,
+    );
+    try {
+      await stmt.executeForRawResultAsync(entries.flat());
+    } finally {
+      stmt.finalizeSync();
+    }
+  }
 }

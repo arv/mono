@@ -26,10 +26,30 @@ export interface Read extends GetChunk, MustGetChunk, Release {
 export interface Write extends Read {
   createChunk<V>(data: V, refs: Refs): Chunk<V>;
   putChunk<V>(c: Chunk<V>): Promise<void>;
+  /**
+   * Optional batch write. Gather all data + meta entries across multiple chunks
+   * and issue a single KV {@link putMany} call, collapsing N bridge crossings
+   * to 1 on React Native. Falls back to concurrent {@link putChunk} calls.
+   */
+  putManyChunks?(chunks: readonly Chunk[]): Promise<void>;
   setHead(name: string, hash: Hash): Promise<void>;
   removeHead(name: string): Promise<void>;
   assertValidHash(hash: Hash): void;
   commit(): Promise<void>;
+}
+
+/**
+ * Write multiple chunks, using {@link Write.putManyChunks} when available.
+ * Falls back to concurrent {@link Write.putChunk} calls otherwise.
+ */
+export async function putManyChunks(
+  write: Write,
+  chunks: readonly Chunk[],
+): Promise<void> {
+  if (write.putManyChunks) {
+    return write.putManyChunks(chunks);
+  }
+  await Promise.all(chunks.map(c => write.putChunk(c)));
 }
 
 export class ChunkNotFoundError extends Error {

@@ -135,19 +135,24 @@ export class WriteImpl
   }
 
   async putChunk(c: Chunk): Promise<void> {
-    const {hash, data, meta} = c;
-    // We never want to write temp hashes to the underlying store.
-    this.assertValidHash(hash);
-    this.#putChunks.add(hash);
-    // Commit contains InternalValue and Hash which are opaque types.
-    const entries: [string, ReadonlyJSONValue][] = [
-      [chunkDataKey(hash), data as ReadonlyJSONValue],
-    ];
-    if (meta.length > 0) {
-      for (const h of meta) {
-        this.assertValidHash(h);
+    return this.putManyChunks([c]);
+  }
+
+  async putManyChunks(chunks: readonly Chunk[]): Promise<void> {
+    const entries: [string, ReadonlyJSONValue][] = [];
+    for (const c of chunks) {
+      const {hash, data, meta} = c;
+      // We never want to write temp hashes to the underlying store.
+      this.assertValidHash(hash);
+      this.#putChunks.add(hash);
+      // Commit contains InternalValue and Hash which are opaque types.
+      entries.push([chunkDataKey(hash), data as ReadonlyJSONValue]);
+      if (meta.length > 0) {
+        for (const h of meta) {
+          this.assertValidHash(h);
+        }
+        entries.push([chunkMetaKey(hash), meta]);
       }
-      entries.push([chunkMetaKey(hash), meta]);
     }
     await putMany(this._tx, entries);
   }

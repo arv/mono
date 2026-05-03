@@ -112,4 +112,13 @@ class OpSQLiteDatabase implements SQLiteDatabase {
     const rows = await this.#db.executeRaw(sql, params);
     return rows as [string, string][];
   }
+
+  async insertManyRows(entries: [string, string][]): Promise<void> {
+    if (entries.length === 0) return;
+    const placeholders = entries.map(() => '(?, ?)').join(', ');
+    await this.#db.executeRaw(
+      `INSERT OR REPLACE INTO entry (key, value) VALUES ${placeholders}`,
+      entries.flat(),
+    );
+  }
 }

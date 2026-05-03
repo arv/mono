@@ -95,4 +95,15 @@ class ZeroSQLiteDatabase implements SQLiteDatabase {
     >[];
     return rows.map(row => Object.values(row) as [string, string]);
   }
+
+  // oxlint-disable-next-line require-await
+  async insertManyRows(entries: [string, string][]): Promise<void> {
+    if (entries.length === 0) return;
+    const placeholders = entries.map(() => '(?, ?)').join(', ');
+    this.#db
+      .prepare(
+        `INSERT OR REPLACE INTO entry (key, value) VALUES ${placeholders}`,
+      )
+      .run(...entries.flat());
+  }
 }
