@@ -1,7 +1,8 @@
 import type {Enum} from '../../../shared/src/enum.ts';
 import {deepEqual} from '../../../shared/src/json.ts';
 import {getSizeOfEntry} from '../../../shared/src/size-of-value.ts';
-import type {Read} from '../dag/store.ts';
+import type {Chunk} from '../dag/chunk.ts';
+import {getManyChunks, type Read} from '../dag/store.ts';
 import type * as FormatVersion from '../format-version-enum.ts';
 import type {FrozenJSONValue} from '../frozen-json.ts';
 import {type Hash, emptyHash} from '../hash.ts';
@@ -38,9 +39,31 @@ type FormatVersion = Enum<typeof FormatVersion>;
  */
 export const NODE_HEADER_SIZE = 11;
 
+function parseNode(
+  chunk: Chunk,
+  hash: Hash,
+  formatVersion: FormatVersion,
+  getEntrySize: <K, V>(k: K, v: V) => number,
+): DataNodeImpl | InternalNodeImpl {
+  const data = parseBTreeNode(chunk.data, formatVersion, getEntrySize);
+  return newNodeImpl(
+    data[NODE_ENTRIES] as Entry<FrozenJSONValue>[] | Entry<Hash>[],
+    hash,
+    data[NODE_LEVEL],
+    false,
+  );
+}
+
 export class BTreeRead implements AsyncIterable<Entry<FrozenJSONValue>> {
   protected readonly _cache: Map<Hash, DataNodeImpl | InternalNodeImpl> =
     new Map();
+
+  // Deduplicates concurrent getNode calls for the same hash so only one
+  // underlying chunk fetch is issued.
+  private readonly _inflight: Map<
+    Hash,
+    Promise<DataNodeImpl | InternalNodeImpl>
+  > = new Map();
 
   protected readonly _dagRead: Read;
   protected readonly _formatVersion: FormatVersion;
@@ -66,26 +89,54 @@ export class BTreeRead implements AsyncIterable<Entry<FrozenJSONValue>> {
     if (hash === emptyHash) {
       return emptyDataNodeImpl;
     }
-
     const cached = this._cache.get(hash);
     if (cached) {
       return cached;
     }
+    const inflight = this._inflight.get(hash);
+    if (inflight) {
+      return inflight;
+    }
+    const p = this._loadNode(hash);
+    this._inflight.set(hash, p);
+    void p.finally(() => this._inflight.delete(hash));
+    return p;
+  }
 
+  private async _loadNode(
+    hash: Hash,
+  ): Promise<DataNodeImpl | InternalNodeImpl> {
     const chunk = await this._dagRead.mustGetChunk(hash);
-    const data = parseBTreeNode(
-      chunk.data,
-      this._formatVersion,
-      this.getEntrySize,
-    );
-    const impl = newNodeImpl(
-      data[NODE_ENTRIES] as Entry<FrozenJSONValue>[],
-      hash,
-      data[NODE_LEVEL],
-      false,
-    );
+    const impl = parseNode(chunk, hash, this._formatVersion, this.getEntrySize);
     this._cache.set(hash, impl);
+    // Speculatively batch-fetch all children of internal nodes so that a
+    // subsequent traversal step hits the cache rather than the KV store.
+    if (!isDataNodeImpl(impl)) {
+      this._prefetchChildren(impl.entries.map(([, h]) => h as Hash));
+    }
     return impl;
+  }
+
+  private _prefetchChildren(hashes: readonly Hash[]): void {
+    const toFetch = hashes.filter(
+      h => h !== emptyHash && !this._cache.has(h) && !this._inflight.has(h),
+    );
+    if (toFetch.length === 0) return;
+    void getManyChunks(this._dagRead, toFetch)
+      .then(chunks => {
+        for (let i = 0; i < toFetch.length; i++) {
+          const h = toFetch[i];
+          const chunk = chunks[i];
+          if (chunk === undefined || this._cache.has(h)) continue;
+          this._cache.set(
+            h,
+            parseNode(chunk, h, this._formatVersion, this.getEntrySize),
+          );
+        }
+      })
+      .catch(() => {
+        // Best-effort prefetch; errors are silently ignored.
+      });
   }
 
   async get(key: string): Promise<FrozenJSONValue | undefined> {

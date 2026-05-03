@@ -21,6 +21,24 @@ export interface Read extends GetChunk, MustGetChunk, Release {
   hasChunk(hash: Hash): Promise<boolean>;
   getHead(name: string): Promise<Hash | undefined>;
   get closed(): boolean;
+  /**
+   * Optional batch read. Fetches multiple chunks with a single KV
+   * {@link getMany} call (one `SELECT … IN (…)` per call instead of one
+   * round-trip per chunk). Falls back to concurrent {@link getChunk} calls.
+   */
+  getManyChunks?(hashes: readonly Hash[]): Promise<(Chunk | undefined)[]>;
+}
+
+/**
+ * Read multiple chunks, using {@link Read.getManyChunks} when available.
+ * Falls back to concurrent {@link Read.getChunk} calls otherwise.
+ */
+export function getManyChunks(
+  read: Read,
+  hashes: readonly Hash[],
+): Promise<(Chunk | undefined)[]> {
+  if (read.getManyChunks) return read.getManyChunks(hashes);
+  return Promise.all(hashes.map(h => read.getChunk(h)));
 }
 
 export interface Write extends Read {

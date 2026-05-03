@@ -81,6 +81,26 @@ export class ReadImpl implements Read {
     return new Chunk(hash, data, refs);
   }
 
+  async getManyChunks(hashes: readonly Hash[]): Promise<(Chunk | undefined)[]> {
+    if (hashes.length === 0) return [];
+    // Interleave data + meta keys: [dataKey(h0), metaKey(h0), dataKey(h1), ...]
+    const keys = hashes.flatMap(h => [chunkDataKey(h), chunkMetaKey(h)]);
+    const values = await getMany(this._tx, keys);
+    return hashes.map((h, i) => {
+      const data = values[i * 2];
+      if (data === undefined) return undefined;
+      const refsVal = values[i * 2 + 1];
+      let refs: Refs;
+      if (refsVal !== undefined) {
+        assertRefs(refsVal);
+        refs = refsVal;
+      } else {
+        refs = [];
+      }
+      return new Chunk(h, data, refs);
+    });
+  }
+
   mustGetChunk(hash: Hash): Promise<Chunk> {
     return mustGetChunk(this, hash);
   }
