@@ -18,6 +18,12 @@ export interface Store {
   write(): Promise<Write>;
   close(): Promise<void>;
   closed: boolean;
+  /**
+   * True when {@link Read.getMany} issues a single batch request rather than
+   * N individual requests (e.g. SQLite `SELECT … IN (…)`). Used by the DAG
+   * layer to decide whether speculative bulk prefetching is worthwhile.
+   */
+  readonly supportsBulkReads?: boolean;
 }
 
 /**

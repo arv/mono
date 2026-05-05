@@ -76,6 +76,7 @@ export type CreateSQLiteDatabase = (
 export class SQLiteStore implements Store {
   readonly #filename: string;
   readonly #entry: StoreEntry;
+  readonly supportsBulkReads = true;
 
   #closed = false;
 

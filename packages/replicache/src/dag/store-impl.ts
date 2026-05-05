@@ -22,7 +22,10 @@ export class StoreImpl implements Store {
   readonly #kv: KVStore;
   readonly #chunkHasher: ChunkHasher;
   readonly #assertValidHash: (hash: Hash) => void;
-  readonly shouldUseBulkPrefetch = true;
+
+  get shouldUseBulkPrefetch(): boolean {
+    return this.#kv.supportsBulkReads ?? false;
+  }
 
   constructor(
     kv: KVStore,
@@ -35,7 +38,11 @@ export class StoreImpl implements Store {
   }
 
   async read(): Promise<Read> {
-    return new ReadImpl(await this.#kv.read(), this.#assertValidHash);
+    return new ReadImpl(
+      await this.#kv.read(),
+      this.#assertValidHash,
+      this.shouldUseBulkPrefetch,
+    );
   }
 
   async write(): Promise<Write> {
@@ -43,6 +50,7 @@ export class StoreImpl implements Store {
       await this.#kv.write(),
       this.#chunkHasher,
       this.#assertValidHash,
+      this.shouldUseBulkPrefetch,
     );
   }
 
@@ -54,11 +62,16 @@ export class StoreImpl implements Store {
 export class ReadImpl implements Read {
   protected readonly _tx: KVRead;
   readonly assertValidHash: (hash: Hash) => void;
-  readonly shouldUseBulkPrefetch = true;
+  readonly shouldUseBulkPrefetch: boolean;
 
-  constructor(kv: KVRead, assertValidHash: (hash: Hash) => void) {
+  constructor(
+    kv: KVRead,
+    assertValidHash: (hash: Hash) => void,
+    shouldUseBulkPrefetch = false,
+  ) {
     this._tx = kv;
     this.assertValidHash = assertValidHash;
+    this.shouldUseBulkPrefetch = shouldUseBulkPrefetch;
   }
 
   hasChunk(hash: Hash): Promise<boolean> {
@@ -144,8 +157,9 @@ export class WriteImpl
     kvw: KVWrite,
     chunkHasher: ChunkHasher,
     assertValidHash: (hash: Hash) => void,
+    shouldUseBulkPrefetch = false,
   ) {
-    super(kvw, assertValidHash);
+    super(kvw, assertValidHash, shouldUseBulkPrefetch);
     this.#chunkHasher = chunkHasher;
   }
 
