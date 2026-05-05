@@ -7,7 +7,7 @@ export interface Store {
   read(): Promise<Read>;
   write(): Promise<Write>;
   close(): Promise<void>;
-  readonly shouldUseBulkPrefetch: boolean;
+  readonly shouldUseBulkPrefetch?: boolean;
 }
 
 interface GetChunk {

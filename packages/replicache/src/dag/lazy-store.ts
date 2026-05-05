@@ -198,7 +198,7 @@ export class LazyStore implements Store {
   }
 
   get shouldUseBulkPrefetch(): boolean {
-    return this.#sourceStore.shouldUseBulkPrefetch;
+    return this.#sourceStore.shouldUseBulkPrefetch ?? false;
   }
 
   /**
@@ -229,7 +229,7 @@ export class LazyRead implements Read {
   readonly #sourceReadOwnedByCaller: boolean;
 
   get shouldUseBulkPrefetch(): boolean {
-    return this._sourceStore.shouldUseBulkPrefetch;
+    return this._sourceStore.shouldUseBulkPrefetch ?? false;
   }
 
   constructor(
