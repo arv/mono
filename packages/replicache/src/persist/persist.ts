@@ -3,12 +3,7 @@ import {assert} from '../../../shared/src/asserts.ts';
 import type {Enum} from '../../../shared/src/enum.ts';
 import type {Chunk} from '../dag/chunk.ts';
 import type {LazyStore} from '../dag/lazy-store.ts';
-import {
-  putManyChunks,
-  type Read,
-  type Store,
-  type Write,
-} from '../dag/store.ts';
+import type {Read, Store, Write} from '../dag/store.ts';
 import type {Commit} from '../db/commit.ts';
 import {
   DEFAULT_HEAD_NAME,
@@ -188,7 +183,7 @@ export async function persistDD31(
       ) {
         // still newer, persist memdag snapshot by writing chunks
         memdagBaseSnapshotPersisted = true;
-        await putManyChunks(perdagWrite, [...gatheredChunks.values()]);
+        await perdagWrite.putManyChunks(gatheredChunks.values());
 
         await setClient(
           clientID,

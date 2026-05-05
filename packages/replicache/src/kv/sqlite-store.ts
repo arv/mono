@@ -3,6 +3,7 @@ import type {ReadonlyJSONValue} from '../../../shared/src/json.ts';
 import {deepFreeze} from '../frozen-json.ts';
 import type {Read, Store, Write} from './store.ts';
 import {
+  maybeTransactionIsClosedRejection,
   throwIfStoreClosed,
   throwIfTransactionClosed,
 } from './throw-if-closed.ts';
@@ -268,8 +269,10 @@ export class SQLiteStoreRead implements Read {
   }
 
   getMany(keys: string[]): Promise<(ReadonlyJSONValue | undefined)[]> {
-    throwIfTransactionClosed(this);
-    return sqliteBatchGet(this.#db, keys, k => this.get(k));
+    return (
+      maybeTransactionIsClosedRejection(this) ??
+      sqliteBatchGet(this.#db, keys, k => this.get(k))
+    );
   }
 
   release(): void {
@@ -319,8 +322,10 @@ export class SQLiteWrite implements Write {
   }
 
   getMany(keys: string[]): Promise<(ReadonlyJSONValue | undefined)[]> {
-    throwIfTransactionClosed(this);
-    return sqliteBatchGet(this.#dbDelegate, keys, k => this.get(k));
+    return (
+      maybeTransactionIsClosedRejection(this) ??
+      sqliteBatchGet(this.#dbDelegate, keys, k => this.get(k))
+    );
   }
 
   async put(key: string, value: ReadonlyJSONValue): Promise<void> {

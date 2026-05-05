@@ -22,6 +22,7 @@ export class StoreImpl implements Store {
   readonly #kv: KVStore;
   readonly #chunkHasher: ChunkHasher;
   readonly #assertValidHash: (hash: Hash) => void;
+  readonly shouldUseBulkPrefetch = true;
 
   constructor(
     kv: KVStore,
@@ -53,7 +54,7 @@ export class StoreImpl implements Store {
 export class ReadImpl implements Read {
   protected readonly _tx: KVRead;
   readonly assertValidHash: (hash: Hash) => void;
-  readonly supportsBulkPrefetch = true as const;
+  readonly shouldUseBulkPrefetch = true;
 
   constructor(kv: KVRead, assertValidHash: (hash: Hash) => void) {
     this._tx = kv;
@@ -159,7 +160,7 @@ export class WriteImpl
     return this.putManyChunks([c]);
   }
 
-  async putManyChunks(chunks: readonly Chunk[]): Promise<void> {
+  async putManyChunks(chunks: Iterable<Chunk>): Promise<void> {
     const entries: [string, ReadonlyJSONValue][] = [];
     for (const c of chunks) {
       const {hash, data, meta} = c;

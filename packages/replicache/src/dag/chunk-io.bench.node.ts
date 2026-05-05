@@ -14,10 +14,6 @@ import {assertHash, makeNewFakeHashFunction} from '../hash.ts';
 import {withRead, withWrite} from '../with-transactions.ts';
 import {createChunk, type Refs} from './chunk.ts';
 import {StoreImpl} from './store-impl.ts';
-import {
-  getManyChunks as getManyChunksHelper,
-  putManyChunks as putManyChunksHelper,
-} from './store.ts';
 import {zeroSQLiteStoreProvider} from '../kv/zero-sqlite/store.ts';
 
 const chunkHasher = makeNewFakeHashFunction();
@@ -64,7 +60,7 @@ for (const n of [10, 50]) {
     const chunks = makeChunks(n);
 
     void withWrite(store, async w => {
-      await putManyChunksHelper(w, chunks);
+      await w.putManyChunks(chunks);
     });
 
     bench(`before: Promise.all getChunk×${n}`, async () => {
@@ -75,7 +71,7 @@ for (const n of [10, 50]) {
 
     bench(`after:  getManyChunks×${n}`, async () => {
       await withRead(store, async r => {
-        await getManyChunksHelper(r, chunks.map(c => c.hash));
+        await r.getManyChunks(chunks.map(c => c.hash));
       });
     });
   });
@@ -93,7 +89,7 @@ for (const n of [10, 50]) {
       const store = makeStore();
       const chunks = makeChunks(n);
       await withWrite(store, async w => {
-        await putManyChunksHelper(w, chunks);
+        await w.putManyChunks(chunks);
       });
     });
   });

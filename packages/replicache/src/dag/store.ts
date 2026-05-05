@@ -7,6 +7,7 @@ export interface Store {
   read(): Promise<Read>;
   write(): Promise<Write>;
   close(): Promise<void>;
+  readonly shouldUseBulkPrefetch: boolean;
 }
 
 interface GetChunk {
@@ -28,31 +29,17 @@ export interface Read extends GetChunk, MustGetChunk, Release {
    * IDB where getManyChunks is `Promise.all` of N individual requests —
    * concurrent but not fewer round-trips.
    */
-  readonly supportsBulkPrefetch: boolean;
-}
-
-export function getManyChunks(
-  read: Read,
-  hashes: readonly Hash[],
-): Promise<(Chunk | undefined)[]> {
-  return read.getManyChunks(hashes);
+  readonly shouldUseBulkPrefetch: boolean;
 }
 
 export interface Write extends Read {
   createChunk<V>(data: V, refs: Refs): Chunk<V>;
   putChunk<V>(c: Chunk<V>): Promise<void>;
-  putManyChunks(chunks: readonly Chunk[]): Promise<void>;
+  putManyChunks(chunks: Iterable<Chunk>): Promise<void>;
   setHead(name: string, hash: Hash): Promise<void>;
   removeHead(name: string): Promise<void>;
   assertValidHash(hash: Hash): void;
   commit(): Promise<void>;
-}
-
-export function putManyChunks(
-  write: Write,
-  chunks: readonly Chunk[],
-): Promise<void> {
-  return write.putManyChunks(chunks);
 }
 
 export class ChunkNotFoundError extends Error {

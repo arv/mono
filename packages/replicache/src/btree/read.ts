@@ -2,7 +2,7 @@ import type {Enum} from '../../../shared/src/enum.ts';
 import {deepEqual} from '../../../shared/src/json.ts';
 import {getSizeOfEntry} from '../../../shared/src/size-of-value.ts';
 import type {Chunk} from '../dag/chunk.ts';
-import {getManyChunks, type Read} from '../dag/store.ts';
+import type {Read} from '../dag/store.ts';
 import type * as FormatVersion from '../format-version-enum.ts';
 import type {FrozenJSONValue} from '../frozen-json.ts';
 import {type Hash, emptyHash} from '../hash.ts';
@@ -122,12 +122,12 @@ export class BTreeRead implements AsyncIterable<Entry<FrozenJSONValue>> {
     // round-trip (e.g. SQLite SELECT … IN). Stores like IDB implement
     // getManyChunks as Promise.all of N individual requests — concurrent but
     // not fewer — so prefetching would flood them with extra work.
-    if (!this._dagRead.supportsBulkPrefetch) return;
+    if (!this._dagRead.shouldUseBulkPrefetch) return;
     const toFetch = hashes.filter(
       h => h !== emptyHash && !this._cache.has(h) && !this.#inflight.has(h),
     );
     if (toFetch.length === 0) return;
-    void getManyChunks(this._dagRead, toFetch)
+    void this._dagRead.getManyChunks(toFetch)
       .then(chunks => {
         for (let i = 0; i < toFetch.length; i++) {
           const h = toFetch[i];

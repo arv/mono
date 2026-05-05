@@ -15,7 +15,6 @@ import {
   type Read,
   type Store,
   type Write,
-  getManyChunks as getManyChunksFromRead,
   mustGetChunk,
 } from './store.ts';
 
@@ -198,6 +197,10 @@ export class LazyStore implements Store {
     return promiseVoid;
   }
 
+  get shouldUseBulkPrefetch(): boolean {
+    return this.#sourceStore.shouldUseBulkPrefetch;
+  }
+
   /**
    * Does not acquire any lock on the store.
    */
@@ -224,7 +227,10 @@ export class LazyRead implements Read {
   #closed = false;
   readonly assertValidHash: (hash: Hash) => void;
   readonly #sourceReadOwnedByCaller: boolean;
-  readonly supportsBulkPrefetch = false;
+
+  get shouldUseBulkPrefetch(): boolean {
+    return this._sourceStore.shouldUseBulkPrefetch;
+  }
 
   constructor(
     heads: Map<string, Hash>,
@@ -302,7 +308,7 @@ export class LazyRead implements Read {
 
     if (missHashes.length > 0) {
       const sourceRead = await this._getSourceRead();
-      const fetched = await getManyChunksFromRead(sourceRead, missHashes);
+      const fetched = await sourceRead.getManyChunks(missHashes);
       for (let i = 0; i < missIndices.length; i++) {
         const chunk = fetched[i];
         result[missIndices[i]] = chunk;
@@ -425,7 +431,7 @@ export class LazyWrite
 
     if (missHashes.length > 0) {
       const sourceRead = await this._getSourceRead();
-      const fetched = await getManyChunksFromRead(sourceRead, missHashes);
+      const fetched = await sourceRead.getManyChunks(missHashes);
       for (let i = 0; i < missIndices.length; i++) {
         const chunk = fetched[i];
         result[missIndices[i]] = chunk;
@@ -438,14 +444,19 @@ export class LazyWrite
     return result;
   }
 
-  putManyChunks(chunks: readonly Chunk[]): Promise<void> {
+  putManyChunks(chunks: Iterable<Chunk>): Promise<void> {
     for (const c of chunks) {
-      void this.putChunk(c);
+      this.#doPutChunk(c, -1);
     }
     return promiseVoid;
   }
 
   putChunk<V>(c: Chunk<V>, size?: number): Promise<void> {
+    this.#doPutChunk(c, size ?? -1);
+    return promiseVoid;
+  }
+
+  #doPutChunk(c: Chunk, size: number): void {
     const {hash, meta} = c;
     this.assertValidHash(hash);
     if (meta.length > 0) {
@@ -456,9 +467,8 @@ export class LazyWrite
     if (this.#createdChunks.has(hash) || this.isMemOnlyChunkHash(hash)) {
       this._pendingMemOnlyChunks.set(hash, c);
     } else {
-      this._pendingCachedChunks.set(hash, {chunk: c, size: size ?? -1});
+      this._pendingCachedChunks.set(hash, {chunk: c, size});
     }
-    return promiseVoid;
   }
 
   async setHead(name: string, hash: Hash): Promise<void> {
