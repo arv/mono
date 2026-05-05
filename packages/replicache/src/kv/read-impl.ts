@@ -34,11 +34,4 @@ export class ReadImpl implements Read {
       Promise.resolve(this.#map.get(key))
     );
   }
-
-  getMany(keys: string[]): Promise<(FrozenJSONValue | undefined)[]> {
-    return (
-      maybeTransactionIsClosedRejection(this) ??
-      Promise.resolve(keys.map(k => this.#map.get(k)))
-    );
-  }
 }
