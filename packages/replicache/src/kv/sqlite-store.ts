@@ -267,7 +267,7 @@ export class SQLiteStoreRead implements Read {
     return deepFreeze(parsedValue);
   }
 
-  async getMany(keys: string[]): Promise<(ReadonlyJSONValue | undefined)[]> {
+  getMany(keys: string[]): Promise<(ReadonlyJSONValue | undefined)[]> {
     throwIfTransactionClosed(this);
     return sqliteBatchGet(this.#db, keys, k => this.get(k));
   }
@@ -318,7 +318,7 @@ export class SQLiteWrite implements Write {
     return deepFreeze(parsedValue);
   }
 
-  async getMany(keys: string[]): Promise<(ReadonlyJSONValue | undefined)[]> {
+  getMany(keys: string[]): Promise<(ReadonlyJSONValue | undefined)[]> {
     throwIfTransactionClosed(this);
     return sqliteBatchGet(this.#dbDelegate, keys, k => this.get(k));
   }

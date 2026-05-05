@@ -21,63 +21,38 @@ export interface Read extends GetChunk, MustGetChunk, Release {
   hasChunk(hash: Hash): Promise<boolean>;
   getHead(name: string): Promise<Hash | undefined>;
   get closed(): boolean;
+  getManyChunks(hashes: readonly Hash[]): Promise<(Chunk | undefined)[]>;
   /**
-   * Optional batch read. Fetches multiple chunks with a single KV
-   * {@link getMany} call (one `SELECT … IN (…)` per call instead of one
-   * round-trip per chunk). Falls back to concurrent {@link getChunk} calls.
+   * True when {@link getManyChunks} reduces the number of underlying storage
+   * round-trips to 1 (e.g. SQLite `SELECT … IN (…)`). False for stores like
+   * IDB where getManyChunks is `Promise.all` of N individual requests —
+   * concurrent but not fewer round-trips.
    */
-  getManyChunks?(hashes: readonly Hash[]): Promise<(Chunk | undefined)[]>;
-  /**
-   * True only when {@link getManyChunks} reduces the number of underlying
-   * storage round-trips to 1 (e.g. SQLite `SELECT … IN (…)`).
-   *
-   * Stores like IDB implement {@link getManyChunks} as `Promise.all` of N
-   * individual requests — concurrent but not fewer. Setting this flag on those
-   * stores would enable speculative prefetching that floods the store with
-   * extra requests and regresses performance.
-   */
-  readonly supportsBulkPrefetch?: true | undefined;
+  readonly supportsBulkPrefetch: boolean;
 }
 
-/**
- * Read multiple chunks, using {@link Read.getManyChunks} when available.
- * Falls back to concurrent {@link Read.getChunk} calls otherwise.
- */
 export function getManyChunks(
   read: Read,
   hashes: readonly Hash[],
 ): Promise<(Chunk | undefined)[]> {
-  if (read.getManyChunks) return read.getManyChunks(hashes);
-  return Promise.all(hashes.map(h => read.getChunk(h)));
+  return read.getManyChunks(hashes);
 }
 
 export interface Write extends Read {
   createChunk<V>(data: V, refs: Refs): Chunk<V>;
   putChunk<V>(c: Chunk<V>): Promise<void>;
-  /**
-   * Optional batch write. Gather all data + meta entries across multiple chunks
-   * and issue a single KV {@link putMany} call, collapsing N bridge crossings
-   * to 1 on React Native. Falls back to concurrent {@link putChunk} calls.
-   */
-  putManyChunks?(chunks: readonly Chunk[]): Promise<void>;
+  putManyChunks(chunks: readonly Chunk[]): Promise<void>;
   setHead(name: string, hash: Hash): Promise<void>;
   removeHead(name: string): Promise<void>;
   assertValidHash(hash: Hash): void;
   commit(): Promise<void>;
 }
 
-/**
- * Write multiple chunks, using {@link Write.putManyChunks} when available.
- * Falls back to concurrent {@link Write.putChunk} calls otherwise.
- */
-export async function putManyChunks(
+export function putManyChunks(
   write: Write,
   chunks: readonly Chunk[],
 ): Promise<void> {
-  if (write.putManyChunks) {
-    return write.putManyChunks(chunks);
-  }
-  await Promise.all(chunks.map(c => write.putChunk(c)));
+  return write.putManyChunks(chunks);
 }
 
 export class ChunkNotFoundError extends Error {

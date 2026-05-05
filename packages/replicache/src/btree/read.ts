@@ -85,13 +85,13 @@ export class BTreeRead implements AsyncIterable<Entry<FrozenJSONValue>> {
     this.chunkHeaderSize = chunkHeaderSize;
   }
 
-  async getNode(hash: Hash): Promise<DataNodeImpl | InternalNodeImpl> {
+  getNode(hash: Hash): Promise<DataNodeImpl | InternalNodeImpl> {
     if (hash === emptyHash) {
-      return emptyDataNodeImpl;
+      return Promise.resolve(emptyDataNodeImpl);
     }
     const cached = this._cache.get(hash);
     if (cached) {
-      return cached;
+      return Promise.resolve(cached);
     }
     const inflight = this.#inflight.get(hash);
     if (inflight) {

@@ -188,7 +188,7 @@ export async function persistDD31(
       ) {
         // still newer, persist memdag snapshot by writing chunks
         memdagBaseSnapshotPersisted = true;
-        await putManyChunks(perdagWrite, Array.from(gatheredChunks.values()));
+        await putManyChunks(perdagWrite, [...gatheredChunks.values()]);
 
         await setClient(
           clientID,

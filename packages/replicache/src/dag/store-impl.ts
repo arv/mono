@@ -155,7 +155,7 @@ export class WriteImpl
     return this._tx;
   }
 
-  async putChunk(c: Chunk): Promise<void> {
+  putChunk(c: Chunk): Promise<void> {
     return this.putManyChunks([c]);
   }
 

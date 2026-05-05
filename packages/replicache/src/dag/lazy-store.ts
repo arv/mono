@@ -224,6 +224,7 @@ export class LazyRead implements Read {
   #closed = false;
   readonly assertValidHash: (hash: Hash) => void;
   readonly #sourceReadOwnedByCaller: boolean;
+  readonly supportsBulkPrefetch = false;
 
   constructor(
     heads: Map<string, Hash>,
@@ -439,7 +440,7 @@ export class LazyWrite
 
   putManyChunks(chunks: readonly Chunk[]): Promise<void> {
     for (const c of chunks) {
-      this.putChunk(c);
+      void this.putChunk(c);
     }
     return promiseVoid;
   }
