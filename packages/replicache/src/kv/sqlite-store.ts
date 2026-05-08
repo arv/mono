@@ -194,102 +194,94 @@ const PENDING_KEY = 1;
 const PENDING_RESOLVE = 2;
 const PENDING_REJECT = 3;
 
-class LookupBatcher {
-  readonly #getMany: PreparedStatement;
-  // Flat striped array: [isGet, key, resolve, reject, ...]
-  #pending: unknown[] = [];
-  #scheduled = false;
-
-  constructor(getMany: PreparedStatement) {
-    this.#getMany = getMany;
+async function flushLookups(
+  pending: unknown[],
+  getMany: PreparedStatement,
+): Promise<void> {
+  const keySet = new Set<string>();
+  for (let i = PENDING_KEY; i < pending.length; i += PENDING_STRIDE) {
+    keySet.add(pending[i] as string);
   }
 
-  get(key: string): Promise<ReadonlyJSONValue | undefined> {
-    return new Promise((resolve, reject) => {
-      this.#pending.push(true, key, resolve, reject);
-      this.#schedule();
-    });
+  let rows: unknown[][];
+  try {
+    rows = await getMany.all([JSON.stringify([...keySet])]);
+  } catch (e) {
+    for (let i = PENDING_REJECT; i < pending.length; i += PENDING_STRIDE) {
+      (pending[i] as (e: unknown) => void)(e);
+    }
+    return;
   }
 
-  has(key: string): Promise<boolean> {
-    return new Promise((resolve, reject) => {
-      this.#pending.push(false, key, resolve, reject);
-      this.#schedule();
-    });
+  const resultMap = new Map<string, string>();
+  for (const row of rows) {
+    resultMap.set(row[0] as string, row[1] as string);
   }
 
-  #schedule(): void {
-    if (!this.#scheduled) {
-      this.#scheduled = true;
-      queueMicrotask(() => void this.#flush());
-    }
-  }
+  for (let i = 0; i < pending.length; i += PENDING_STRIDE) {
+    const isGet = pending[i + PENDING_IS_GET] as boolean;
+    const key = pending[i + PENDING_KEY] as string;
+    const resolve = pending[i + PENDING_RESOLVE] as (v: unknown) => void;
+    const reject = pending[i + PENDING_REJECT] as (e: unknown) => void;
 
-  async #flush(): Promise<void> {
-    this.#scheduled = false;
-    const pending = this.#pending.splice(0);
-    if (pending.length === 0) return;
-
-    const keySet = new Set<string>();
-    for (let i = PENDING_KEY; i < pending.length; i += PENDING_STRIDE) {
-      keySet.add(pending[i] as string);
-    }
-
-    let rows: unknown[][];
-    try {
-      rows = await this.#getMany.all([JSON.stringify([...keySet])]);
-    } catch (e) {
-      for (let i = PENDING_REJECT; i < pending.length; i += PENDING_STRIDE) {
-        (pending[i] as (e: unknown) => void)(e);
-      }
-      return;
-    }
-
-    const resultMap = new Map<string, string>();
-    for (const row of rows) {
-      resultMap.set(row[0] as string, row[1] as string);
-    }
-
-    for (let i = 0; i < pending.length; i += PENDING_STRIDE) {
-      const isGet = pending[i + PENDING_IS_GET] as boolean;
-      const key = pending[i + PENDING_KEY] as string;
-      const resolve = pending[i + PENDING_RESOLVE] as (v: unknown) => void;
-      const reject = pending[i + PENDING_REJECT] as (e: unknown) => void;
-
-      if (isGet) {
-        const raw = resultMap.get(key);
-        if (raw === undefined) {
-          resolve(undefined);
-        } else {
-          try {
-            resolve(deepFreeze(JSON.parse(raw) as ReadonlyJSONValue));
-          } catch (e) {
-            reject(e);
-          }
-        }
+    if (isGet) {
+      const raw = resultMap.get(key);
+      if (raw === undefined) {
+        resolve(undefined);
       } else {
-        resolve(resultMap.has(key));
+        try {
+          resolve(deepFreeze(JSON.parse(raw) as ReadonlyJSONValue));
+        } catch (e) {
+          reject(e);
+        }
       }
+    } else {
+      resolve(resultMap.has(key));
     }
   }
 }
 
 export class SQLiteStoreRead implements Read {
-  #release: () => void;
+  readonly #release: () => void;
+  readonly #getMany: PreparedStatement;
   #closed = false;
-  #batcher: LookupBatcher;
+  // Flat striped array: [isGet, key, resolve, reject, ...]
+  #pending: unknown[] = [];
+  #scheduled = false;
 
   constructor(release: () => void, preparedStatements: PreparedStatements) {
     this.#release = release;
-    this.#batcher = new LookupBatcher(preparedStatements.getMany);
+    this.#getMany = preparedStatements.getMany;
   }
 
   has(key: string): Promise<boolean> {
-    return maybeTransactionIsClosedRejection(this) ?? this.#batcher.has(key);
+    return (
+      maybeTransactionIsClosedRejection(this) ??
+      new Promise((resolve, reject) => {
+        this.#pending.push(false, key, resolve, reject);
+        this.#scheduleLookup();
+      })
+    );
   }
 
   get(key: string): Promise<ReadonlyJSONValue | undefined> {
-    return maybeTransactionIsClosedRejection(this) ?? this.#batcher.get(key);
+    return (
+      maybeTransactionIsClosedRejection(this) ??
+      new Promise((resolve, reject) => {
+        this.#pending.push(true, key, resolve, reject);
+        this.#scheduleLookup();
+      })
+    );
+  }
+
+  #scheduleLookup(): void {
+    if (!this.#scheduled) {
+      this.#scheduled = true;
+      queueMicrotask(() => {
+        this.#scheduled = false;
+        void flushLookups(this.#pending.splice(0), this.#getMany);
+      });
+    }
   }
 
   release(): void {
@@ -308,9 +300,11 @@ export class SQLiteWrite implements Write {
   readonly #release: () => void;
   readonly #dbDelegate: SQLiteDatabase;
   readonly #preparedStatements: PreparedStatements;
-  readonly #batcher: LookupBatcher;
   #committed = false;
   #closed = false;
+  // Flat striped array: [isGet, key, resolve, reject, ...]
+  #pending: unknown[] = [];
+  #scheduled = false;
 
   constructor(
     release: () => void,
@@ -320,15 +314,39 @@ export class SQLiteWrite implements Write {
     this.#release = release;
     this.#dbDelegate = dbDelegate;
     this.#preparedStatements = preparedStatements;
-    this.#batcher = new LookupBatcher(preparedStatements.getMany);
   }
 
   has(key: string): Promise<boolean> {
-    return maybeTransactionIsClosedRejection(this) ?? this.#batcher.has(key);
+    return (
+      maybeTransactionIsClosedRejection(this) ??
+      new Promise((resolve, reject) => {
+        this.#pending.push(false, key, resolve, reject);
+        this.#scheduleLookup();
+      })
+    );
   }
 
   get(key: string): Promise<ReadonlyJSONValue | undefined> {
-    return maybeTransactionIsClosedRejection(this) ?? this.#batcher.get(key);
+    return (
+      maybeTransactionIsClosedRejection(this) ??
+      new Promise((resolve, reject) => {
+        this.#pending.push(true, key, resolve, reject);
+        this.#scheduleLookup();
+      })
+    );
+  }
+
+  #scheduleLookup(): void {
+    if (!this.#scheduled) {
+      this.#scheduled = true;
+      queueMicrotask(() => {
+        this.#scheduled = false;
+        void flushLookups(
+          this.#pending.splice(0),
+          this.#preparedStatements.getMany,
+        );
+      });
+    }
   }
 
   async put(key: string, value: ReadonlyJSONValue): Promise<void> {
