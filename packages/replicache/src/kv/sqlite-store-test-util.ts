@@ -90,6 +90,38 @@ export function runSQLiteStoreTests<TOptions = unknown>(
   runAll(storeName, () => createStoreWithDefaults(`test-${++storeCounter}`));
 
   // SQLite-specific tests
+  test('batches concurrent get and has calls into a single query', async () => {
+    const store = createStoreWithDefaults(`batch-test-${++storeCounter}`);
+
+    await withWrite(store, async wt => {
+      await wt.put('a', 'alpha');
+      await wt.put('b', 'beta');
+    });
+
+    await withRead(store, async rt => {
+      // Fire all lookups without awaiting — they should be batched into one query
+      const [valA, valB, hasA, hasC] = await Promise.all([
+        rt.get('a'),
+        rt.get('b'),
+        rt.has('a'),
+        rt.has('c'),
+      ]);
+      expect(valA).toBe('alpha');
+      expect(valB).toBe('beta');
+      expect(hasA).toBe(true);
+      expect(hasC).toBe(false);
+    });
+
+    // Same via write transaction
+    await withWrite(store, async wt => {
+      const [valA, hasB] = await Promise.all([wt.get('a'), wt.has('b')]);
+      expect(valA).toBe('alpha');
+      expect(hasB).toBe(true);
+    });
+
+    await store.close();
+  });
+
   test('shared read transaction behavior', async () => {
     const store = createStoreWithDefaults(`shared-read-test-${++storeCounter}`);
 

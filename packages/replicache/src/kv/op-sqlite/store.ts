@@ -57,6 +57,10 @@ class OpSQLitePreparedStatement implements PreparedStatement {
   async exec(params: string[]): Promise<void> {
     await this.#db.executeRaw(this.#sql, params);
   }
+
+  all(params: string[]): Promise<unknown[][]> {
+    return this.#db.executeRaw(this.#sql, params);
+  }
 }
 
 class OpSQLiteDatabase implements SQLiteDatabase {

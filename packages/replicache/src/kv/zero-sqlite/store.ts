@@ -50,6 +50,12 @@ class ZeroSQLitePreparedStatement implements PreparedStatement {
   async exec(params: string[]): Promise<void> {
     this.#statement.run(params);
   }
+
+  // oxlint-disable-next-line require-await
+  async all(params: string[]): Promise<unknown[][]> {
+    const rows = this.#statement.all(...params) as Record<string, unknown>[];
+    return rows.map(row => Object.values(row));
+  }
 }
 
 class ZeroSQLiteDatabase implements SQLiteDatabase {

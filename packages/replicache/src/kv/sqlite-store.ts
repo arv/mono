@@ -3,6 +3,7 @@ import type {ReadonlyJSONValue} from '../../../shared/src/json.ts';
 import {deepFreeze} from '../frozen-json.ts';
 import type {Read, Store, Write} from './store.ts';
 import {
+  maybeTransactionIsClosedRejection,
   throwIfStoreClosed,
   throwIfTransactionClosed,
 } from './throw-if-closed.ts';
@@ -17,6 +18,7 @@ import {
 export interface PreparedStatement {
   firstValue(params: string[]): Promise<unknown>;
   exec(params: string[]): Promise<void>;
+  all(params: string[]): Promise<unknown[][]>;
 }
 
 export interface SQLiteDatabase {
@@ -135,6 +137,7 @@ export type PreparedStatements = {
   get: PreparedStatement;
   put: PreparedStatement;
   del: PreparedStatement;
+  getMany: PreparedStatement;
 };
 
 export interface SQLiteStoreOptions {
@@ -178,34 +181,113 @@ export function setupDatabase(
       'INSERT OR REPLACE INTO entry (key, value) VALUES (?, ?)',
     ),
     del: delegate.prepare('DELETE FROM entry WHERE key = ?'),
+    getMany: delegate.prepare(
+      `SELECT key, value FROM entry WHERE key IN (SELECT value FROM json_each(?))`,
+    ),
   };
+}
+
+type PendingLookup =
+  | {
+      type: 'get';
+      key: string;
+      resolve: (v: ReadonlyJSONValue | undefined) => void;
+      reject: (e: unknown) => void;
+    }
+  | {
+      type: 'has';
+      key: string;
+      resolve: (v: boolean) => void;
+      reject: (e: unknown) => void;
+    };
+
+class LookupBatcher {
+  readonly #getMany: PreparedStatement;
+  #pending: PendingLookup[] = [];
+  #scheduled = false;
+
+  constructor(getMany: PreparedStatement) {
+    this.#getMany = getMany;
+  }
+
+  get(key: string): Promise<ReadonlyJSONValue | undefined> {
+    return new Promise((resolve, reject) => {
+      this.#pending.push({type: 'get', key, resolve, reject});
+      this.#schedule();
+    });
+  }
+
+  has(key: string): Promise<boolean> {
+    return new Promise((resolve, reject) => {
+      this.#pending.push({type: 'has', key, resolve, reject});
+      this.#schedule();
+    });
+  }
+
+  #schedule(): void {
+    if (!this.#scheduled) {
+      this.#scheduled = true;
+      queueMicrotask(() => void this.#flush());
+    }
+  }
+
+  async #flush(): Promise<void> {
+    this.#scheduled = false;
+    const pending = this.#pending.splice(0);
+    if (pending.length === 0) return;
+
+    const keys = [...new Set(pending.map(p => p.key))];
+
+    let rows: unknown[][];
+    try {
+      rows = await this.#getMany.all([JSON.stringify(keys)]);
+    } catch (e) {
+      for (const p of pending) {
+        p.reject(e);
+      }
+      return;
+    }
+
+    const resultMap = new Map<string, string>();
+    for (const row of rows) {
+      resultMap.set(row[0] as string, row[1] as string);
+    }
+
+    for (const p of pending) {
+      if (p.type === 'get') {
+        const raw = resultMap.get(p.key);
+        if (raw === undefined) {
+          p.resolve(undefined);
+        } else {
+          try {
+            p.resolve(deepFreeze(JSON.parse(raw) as ReadonlyJSONValue));
+          } catch (e) {
+            p.reject(e);
+          }
+        }
+      } else {
+        p.resolve(resultMap.has(p.key));
+      }
+    }
+  }
 }
 
 export class SQLiteStoreRead implements Read {
   #release: () => void;
   #closed = false;
-  #preparedStatements: PreparedStatements;
+  #batcher: LookupBatcher;
 
   constructor(release: () => void, preparedStatements: PreparedStatements) {
     this.#release = release;
-    this.#preparedStatements = preparedStatements;
+    this.#batcher = new LookupBatcher(preparedStatements.getMany);
   }
 
-  async has(key: string): Promise<boolean> {
-    throwIfTransactionClosed(this);
-    const value = await this.#preparedStatements.has.firstValue([key]);
-    return value !== undefined;
+  has(key: string): Promise<boolean> {
+    return maybeTransactionIsClosedRejection(this) ?? this.#batcher.has(key);
   }
 
-  async get(key: string): Promise<ReadonlyJSONValue | undefined> {
-    throwIfTransactionClosed(this);
-    const value = await this.#preparedStatements.get.firstValue([key]);
-    if (!value) {
-      return undefined;
-    }
-
-    const parsedValue = JSON.parse(value as string) as ReadonlyJSONValue;
-    return deepFreeze(parsedValue);
+  get(key: string): Promise<ReadonlyJSONValue | undefined> {
+    return maybeTransactionIsClosedRejection(this) ?? this.#batcher.get(key);
   }
 
   release(): void {
@@ -224,6 +306,7 @@ export class SQLiteWrite implements Write {
   readonly #release: () => void;
   readonly #dbDelegate: SQLiteDatabase;
   readonly #preparedStatements: PreparedStatements;
+  readonly #batcher: LookupBatcher;
   #committed = false;
   #closed = false;
 
@@ -235,23 +318,15 @@ export class SQLiteWrite implements Write {
     this.#release = release;
     this.#dbDelegate = dbDelegate;
     this.#preparedStatements = preparedStatements;
+    this.#batcher = new LookupBatcher(preparedStatements.getMany);
   }
 
-  async has(key: string): Promise<boolean> {
-    throwIfTransactionClosed(this);
-    const value = await this.#preparedStatements.has.firstValue([key]);
-    return value !== undefined;
+  has(key: string): Promise<boolean> {
+    return maybeTransactionIsClosedRejection(this) ?? this.#batcher.has(key);
   }
 
-  async get(key: string): Promise<ReadonlyJSONValue | undefined> {
-    throwIfTransactionClosed(this);
-    const value = await this.#preparedStatements.get.firstValue([key]);
-    if (!value) {
-      return undefined;
-    }
-
-    const parsedValue = JSON.parse(value as string) as ReadonlyJSONValue;
-    return deepFreeze(parsedValue);
+  get(key: string): Promise<ReadonlyJSONValue | undefined> {
+    return maybeTransactionIsClosedRejection(this) ?? this.#batcher.get(key);
   }
 
   async put(key: string, value: ReadonlyJSONValue): Promise<void> {

@@ -49,6 +49,11 @@ class ExpoSQLitePreparedStatement implements PreparedStatement {
   async exec(params: string[]): Promise<void> {
     await this.#statement.executeForRawResultAsync(params);
   }
+
+  async all(params: string[]): Promise<unknown[][]> {
+    const result = await this.#statement.executeForRawResultAsync(params);
+    return result.getAllAsync() as Promise<unknown[][]>;
+  }
 }
 
 class ExpoSQLiteDatabase implements SQLiteDatabase {
