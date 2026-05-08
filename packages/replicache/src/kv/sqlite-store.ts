@@ -187,23 +187,17 @@ export function setupDatabase(
   };
 }
 
-type PendingLookup =
-  | {
-      type: 'get';
-      key: string;
-      resolve: (v: ReadonlyJSONValue | undefined) => void;
-      reject: (e: unknown) => void;
-    }
-  | {
-      type: 'has';
-      key: string;
-      resolve: (v: boolean) => void;
-      reject: (e: unknown) => void;
-    };
+// Striped layout per entry: [isGet, key, resolve, reject]
+const PENDING_STRIDE = 4;
+const PENDING_IS_GET = 0;
+const PENDING_KEY = 1;
+const PENDING_RESOLVE = 2;
+const PENDING_REJECT = 3;
 
 class LookupBatcher {
   readonly #getMany: PreparedStatement;
-  #pending: PendingLookup[] = [];
+  // Flat striped array: [isGet, key, resolve, reject, ...]
+  #pending: unknown[] = [];
   #scheduled = false;
 
   constructor(getMany: PreparedStatement) {
@@ -212,14 +206,14 @@ class LookupBatcher {
 
   get(key: string): Promise<ReadonlyJSONValue | undefined> {
     return new Promise((resolve, reject) => {
-      this.#pending.push({type: 'get', key, resolve, reject});
+      this.#pending.push(true, key, resolve, reject);
       this.#schedule();
     });
   }
 
   has(key: string): Promise<boolean> {
     return new Promise((resolve, reject) => {
-      this.#pending.push({type: 'has', key, resolve, reject});
+      this.#pending.push(false, key, resolve, reject);
       this.#schedule();
     });
   }
@@ -236,14 +230,17 @@ class LookupBatcher {
     const pending = this.#pending.splice(0);
     if (pending.length === 0) return;
 
-    const keys = [...new Set(pending.map(p => p.key))];
+    const keySet = new Set<string>();
+    for (let i = PENDING_KEY; i < pending.length; i += PENDING_STRIDE) {
+      keySet.add(pending[i] as string);
+    }
 
     let rows: unknown[][];
     try {
-      rows = await this.#getMany.all([JSON.stringify(keys)]);
+      rows = await this.#getMany.all([JSON.stringify([...keySet])]);
     } catch (e) {
-      for (const p of pending) {
-        p.reject(e);
+      for (let i = PENDING_REJECT; i < pending.length; i += PENDING_STRIDE) {
+        (pending[i] as (e: unknown) => void)(e);
       }
       return;
     }
@@ -253,20 +250,25 @@ class LookupBatcher {
       resultMap.set(row[0] as string, row[1] as string);
     }
 
-    for (const p of pending) {
-      if (p.type === 'get') {
-        const raw = resultMap.get(p.key);
+    for (let i = 0; i < pending.length; i += PENDING_STRIDE) {
+      const isGet = pending[i + PENDING_IS_GET] as boolean;
+      const key = pending[i + PENDING_KEY] as string;
+      const resolve = pending[i + PENDING_RESOLVE] as (v: unknown) => void;
+      const reject = pending[i + PENDING_REJECT] as (e: unknown) => void;
+
+      if (isGet) {
+        const raw = resultMap.get(key);
         if (raw === undefined) {
-          p.resolve(undefined);
+          resolve(undefined);
         } else {
           try {
-            p.resolve(deepFreeze(JSON.parse(raw) as ReadonlyJSONValue));
+            resolve(deepFreeze(JSON.parse(raw) as ReadonlyJSONValue));
           } catch (e) {
-            p.reject(e);
+            reject(e);
           }
         }
       } else {
-        p.resolve(resultMap.has(p.key));
+        resolve(resultMap.has(key));
       }
     }
   }
