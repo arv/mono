@@ -3,48 +3,48 @@ import {SQLiteStoreRead, type PreparedStatements} from './sqlite-store.ts';
 
 function makeMockStatements(
   opts: {
-    getManyRows?: unknown[][];
-    hasManyRows?: unknown[][];
+    getRows?: unknown[][];
+    hasRows?: unknown[][];
   } = {},
 ): {
   stmts: PreparedStatements;
-  getManyCallCount: () => number;
-  hasManyCallCount: () => number;
+  getCallCount: () => number;
+  hasCallCount: () => number;
 } {
-  let getManyCount = 0;
-  let hasManyCount = 0;
+  let getCount = 0;
+  let hasCount = 0;
 
   const stmts: PreparedStatements = {
-    put: {async exec() {}},
-    del: {async exec() {}},
-    getMany: {
+    put: {async exec() {}, all: () => Promise.resolve([])},
+    del: {async exec() {}, all: () => Promise.resolve([])},
+    get: {
       async exec() {},
       // oxlint-disable-next-line require-await
       async all() {
-        getManyCount++;
-        return opts.getManyRows ?? [];
+        getCount++;
+        return opts.getRows ?? [];
       },
     },
-    hasMany: {
+    has: {
       async exec() {},
       // oxlint-disable-next-line require-await
       async all() {
-        hasManyCount++;
-        return opts.hasManyRows ?? [];
+        hasCount++;
+        return opts.hasRows ?? [];
       },
     },
   };
 
   return {
     stmts,
-    getManyCallCount: () => getManyCount,
-    hasManyCallCount: () => hasManyCount,
+    getCallCount: () => getCount,
+    hasCallCount: () => hasCount,
   };
 }
 
-test('concurrent gets are batched into a single getMany call', async () => {
-  const {stmts, getManyCallCount} = makeMockStatements({
-    getManyRows: [
+test('concurrent gets are batched into a single get call', async () => {
+  const {stmts, getCallCount} = makeMockStatements({
+    getRows: [
       ['a', '"alpha"'],
       ['b', '"beta"'],
     ],
@@ -57,41 +57,41 @@ test('concurrent gets are batched into a single getMany call', async () => {
     read.get('c'),
   ]);
 
-  expect(getManyCallCount()).toBe(1);
+  expect(getCallCount()).toBe(1);
   expect(valA).toBe('alpha');
   expect(valB).toBe('beta');
   expect(valC).toBeUndefined();
 });
 
-test('concurrent has calls are batched into a single hasMany call', async () => {
-  const {stmts, hasManyCallCount} = makeMockStatements({
-    hasManyRows: [['a']],
+test('concurrent has calls are batched into a single has call', async () => {
+  const {stmts, hasCallCount} = makeMockStatements({
+    hasRows: [['a']],
   });
   const read = new SQLiteStoreRead(() => {}, stmts);
 
   const [hasA, hasB] = await Promise.all([read.has('a'), read.has('b')]);
 
-  expect(hasManyCallCount()).toBe(1);
+  expect(hasCallCount()).toBe(1);
   expect(hasA).toBe(true);
   expect(hasB).toBe(false);
 });
 
 test('sequential awaited gets each trigger their own flush', async () => {
-  const {stmts, getManyCallCount} = makeMockStatements();
+  const {stmts, getCallCount} = makeMockStatements();
   const read = new SQLiteStoreRead(() => {}, stmts);
 
   await read.get('a');
   await read.get('b');
 
-  expect(getManyCallCount()).toBe(2);
+  expect(getCallCount()).toBe(2);
 });
 
 test('mixed concurrent gets and has are batched separately', async () => {
-  const {stmts, getManyCallCount, hasManyCallCount} = makeMockStatements();
+  const {stmts, getCallCount, hasCallCount} = makeMockStatements();
   const read = new SQLiteStoreRead(() => {}, stmts);
 
   await Promise.all([read.get('a'), read.has('b'), read.get('c')]);
 
-  expect(getManyCallCount()).toBe(1);
-  expect(hasManyCallCount()).toBe(1);
+  expect(getCallCount()).toBe(1);
+  expect(hasCallCount()).toBe(1);
 });

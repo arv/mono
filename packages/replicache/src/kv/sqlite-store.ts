@@ -130,8 +130,8 @@ export function safeFilename(name: string): string {
 export type PreparedStatements = {
   put: PreparedStatement;
   del: PreparedStatement;
-  getMany: PreparedStatement;
-  hasMany: PreparedStatement;
+  get: PreparedStatement;
+  has: PreparedStatement;
 };
 
 export interface SQLiteStoreOptions {
@@ -173,10 +173,10 @@ export function setupDatabase(
       'INSERT OR REPLACE INTO entry (key, value) VALUES (?, ?)',
     ),
     del: delegate.prepare('DELETE FROM entry WHERE key = ?'),
-    getMany: delegate.prepare(
+    get: delegate.prepare(
       `SELECT key, value FROM entry WHERE key IN (SELECT value FROM json_each(?))`,
     ),
-    hasMany: delegate.prepare(
+    has: delegate.prepare(
       `SELECT key FROM entry WHERE key IN (SELECT value FROM json_each(?))`,
     ),
   };
@@ -188,30 +188,32 @@ const PENDING_KEY = 0;
 const PENDING_RESOLVE = 1;
 const PENDING_REJECT = 2;
 
-async function flushGets(
+async function flushBatch(
   pending: unknown[],
-  getMany: PreparedStatement,
+  stmt: PreparedStatement,
+  settle: (pending: unknown[], rows: unknown[][]) => void,
 ): Promise<void> {
   const keys: unknown[] = [];
   for (let i = PENDING_KEY; i < pending.length; i += PENDING_STRIDE) {
     keys.push(pending[i]);
   }
-
   let rows: unknown[][];
   try {
-    rows = await getMany.all([JSON.stringify(keys)]);
+    rows = await stmt.all([JSON.stringify(keys)]);
   } catch (e) {
     for (let i = PENDING_REJECT; i < pending.length; i += PENDING_STRIDE) {
       (pending[i] as (e: unknown) => void)(e);
     }
     return;
   }
+  settle(pending, rows);
+}
 
+function settleGets(pending: unknown[], rows: unknown[][]): void {
   const resultMap = new Map<string, string>();
   for (const row of rows) {
     resultMap.set(row[0] as string, row[1] as string);
   }
-
   for (let i = 0; i < pending.length; i += PENDING_STRIDE) {
     const key = pending[i + PENDING_KEY] as string;
     const resolve = pending[i + PENDING_RESOLVE] as (
@@ -231,25 +233,7 @@ async function flushGets(
   }
 }
 
-async function flushHas(
-  pending: unknown[],
-  hasMany: PreparedStatement,
-): Promise<void> {
-  const keys: unknown[] = [];
-  for (let i = PENDING_KEY; i < pending.length; i += PENDING_STRIDE) {
-    keys.push(pending[i]);
-  }
-
-  let rows: unknown[][];
-  try {
-    rows = await hasMany.all([JSON.stringify(keys)]);
-  } catch (e) {
-    for (let i = PENDING_REJECT; i < pending.length; i += PENDING_STRIDE) {
-      (pending[i] as (e: unknown) => void)(e);
-    }
-    return;
-  }
-
+function settleHas(pending: unknown[], rows: unknown[][]): void {
   const existingKeys = new Set(rows.map(row => row[0] as string));
   for (let i = 0; i < pending.length; i += PENDING_STRIDE) {
     const key = pending[i + PENDING_KEY] as string;
@@ -297,11 +281,11 @@ export class SQLiteStoreRead implements Read {
       this.#scheduled = true;
       queueMicrotask(() => {
         this.#scheduled = false;
-        const {getMany, hasMany} = this.#preparedStatements;
+        const {get, has} = this.#preparedStatements;
         const gets = this.#pendingGets.splice(0);
         const hass = this.#pendingHas.splice(0);
-        if (gets.length > 0) void flushGets(gets, getMany);
-        if (hass.length > 0) void flushHas(hass, hasMany);
+        if (gets.length > 0) void flushBatch(gets, get, settleGets);
+        if (hass.length > 0) void flushBatch(hass, has, settleHas);
       });
     }
   }
