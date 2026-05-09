@@ -128,10 +128,10 @@ export function safeFilename(name: string): string {
 }
 
 export type PreparedStatements = {
+  has: PreparedStatement;
+  get: PreparedStatement;
   put: PreparedStatement;
   del: PreparedStatement;
-  get: PreparedStatement;
-  has: PreparedStatement;
 };
 
 export interface SQLiteStoreOptions {
@@ -169,16 +169,16 @@ export function setupDatabase(
 
   // Prepare common statements
   return {
+    has: delegate.prepare(
+      `SELECT key FROM entry WHERE key IN (SELECT value FROM json_each(?))`,
+    ),
+    get: delegate.prepare(
+      `SELECT key, value FROM entry WHERE key IN (SELECT value FROM json_each(?))`,
+    ),
     put: delegate.prepare(
       'INSERT OR REPLACE INTO entry (key, value) VALUES (?, ?)',
     ),
     del: delegate.prepare('DELETE FROM entry WHERE key = ?'),
-    get: delegate.prepare(
-      `SELECT key, value FROM entry WHERE key IN (SELECT value FROM json_each(?))`,
-    ),
-    has: delegate.prepare(
-      `SELECT key FROM entry WHERE key IN (SELECT value FROM json_each(?))`,
-    ),
   };
 }
 
@@ -210,26 +210,19 @@ function settleGets(
   callbacks: unknown[],
   rows: unknown[][],
 ): void {
-  const resultMap = new Map<string, string>();
-  for (const row of rows) {
-    resultMap.set(row[0] as string, row[1] as string);
-  }
+  const resultMap = new Map(rows as [string, string][]);
   for (let i = 0; i < keys.length; i++) {
-    const resolve = callbacks[i * CB_STRIDE + CB_RESOLVE] as (
-      v: ReadonlyJSONValue | undefined,
-    ) => void;
-    const reject = callbacks[i * CB_STRIDE + CB_REJECT] as (
-      e: unknown,
-    ) => void;
     const raw = resultMap.get(keys[i]);
     try {
-      resolve(
+      (callbacks[i * CB_STRIDE + CB_RESOLVE] as (
+        v: ReadonlyJSONValue | undefined,
+      ) => void)(
         raw === undefined
           ? undefined
           : deepFreeze(JSON.parse(raw) as ReadonlyJSONValue),
       );
     } catch (e) {
-      reject(e);
+      (callbacks[i * CB_STRIDE + CB_REJECT] as (e: unknown) => void)(e);
     }
   }
 }
