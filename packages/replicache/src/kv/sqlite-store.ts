@@ -138,6 +138,7 @@ export type PreparedStatements = {
   put: PreparedStatement;
   del: PreparedStatement;
   getMany: PreparedStatement;
+  hasMany: PreparedStatement;
 };
 
 export interface SQLiteStoreOptions {
@@ -184,20 +185,48 @@ export function setupDatabase(
     getMany: delegate.prepare(
       `SELECT key, value FROM entry WHERE key IN (SELECT value FROM json_each(?))`,
     ),
+    hasMany: delegate.prepare(
+      `SELECT key FROM entry WHERE key IN (SELECT value FROM json_each(?))`,
+    ),
   };
 }
 
-// Striped layout per entry: [isGet, key, resolve, reject]
-const PENDING_STRIDE = 4;
-const PENDING_IS_GET = 0;
-const PENDING_KEY = 1;
-const PENDING_RESOLVE = 2;
-const PENDING_REJECT = 3;
+// Striped layout per entry: [key, resolve, reject]
+const PENDING_STRIDE = 3;
+const PENDING_KEY = 0;
+const PENDING_RESOLVE = 1;
+const PENDING_REJECT = 2;
 
-async function flushLookups(
+async function flushGets(
   pending: unknown[],
+  getSingle: PreparedStatement,
   getMany: PreparedStatement,
 ): Promise<void> {
+  if (pending.length === PENDING_STRIDE) {
+    const key = pending[PENDING_KEY] as string;
+    const resolve = pending[PENDING_RESOLVE] as (
+      v: ReadonlyJSONValue | undefined,
+    ) => void;
+    const reject = pending[PENDING_REJECT] as (e: unknown) => void;
+    let raw: unknown;
+    try {
+      raw = await getSingle.firstValue([key]);
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    try {
+      resolve(
+        raw === undefined
+          ? undefined
+          : deepFreeze(JSON.parse(raw as string) as ReadonlyJSONValue),
+      );
+    } catch (e) {
+      reject(e);
+    }
+    return;
+  }
+
   const keySet = new Set<string>();
   for (let i = PENDING_KEY; i < pending.length; i += PENDING_STRIDE) {
     keySet.add(pending[i] as string);
@@ -219,46 +248,83 @@ async function flushLookups(
   }
 
   for (let i = 0; i < pending.length; i += PENDING_STRIDE) {
-    const isGet = pending[i + PENDING_IS_GET] as boolean;
     const key = pending[i + PENDING_KEY] as string;
-    const resolve = pending[i + PENDING_RESOLVE] as (v: unknown) => void;
+    const resolve = pending[i + PENDING_RESOLVE] as (
+      v: ReadonlyJSONValue | undefined,
+    ) => void;
     const reject = pending[i + PENDING_REJECT] as (e: unknown) => void;
-
-    if (isGet) {
-      const raw = resultMap.get(key);
-      if (raw === undefined) {
-        resolve(undefined);
-      } else {
-        try {
-          resolve(deepFreeze(JSON.parse(raw) as ReadonlyJSONValue));
-        } catch (e) {
-          reject(e);
-        }
-      }
-    } else {
-      resolve(resultMap.has(key));
+    const raw = resultMap.get(key);
+    try {
+      resolve(
+        raw === undefined
+          ? undefined
+          : deepFreeze(JSON.parse(raw) as ReadonlyJSONValue),
+      );
+    } catch (e) {
+      reject(e);
     }
+  }
+}
+
+async function flushHas(
+  pending: unknown[],
+  hasSingle: PreparedStatement,
+  hasMany: PreparedStatement,
+): Promise<void> {
+  if (pending.length === PENDING_STRIDE) {
+    const key = pending[PENDING_KEY] as string;
+    const resolve = pending[PENDING_RESOLVE] as (v: boolean) => void;
+    const reject = pending[PENDING_REJECT] as (e: unknown) => void;
+    try {
+      resolve((await hasSingle.firstValue([key])) !== undefined);
+    } catch (e) {
+      reject(e);
+    }
+    return;
+  }
+
+  const keySet = new Set<string>();
+  for (let i = PENDING_KEY; i < pending.length; i += PENDING_STRIDE) {
+    keySet.add(pending[i] as string);
+  }
+
+  let rows: unknown[][];
+  try {
+    rows = await hasMany.all([JSON.stringify([...keySet])]);
+  } catch (e) {
+    for (let i = PENDING_REJECT; i < pending.length; i += PENDING_STRIDE) {
+      (pending[i] as (e: unknown) => void)(e);
+    }
+    return;
+  }
+
+  const existingKeys = new Set(rows.map(row => row[0] as string));
+  for (let i = 0; i < pending.length; i += PENDING_STRIDE) {
+    const key = pending[i + PENDING_KEY] as string;
+    const resolve = pending[i + PENDING_RESOLVE] as (v: boolean) => void;
+    resolve(existingKeys.has(key));
   }
 }
 
 export class SQLiteStoreRead implements Read {
   readonly #release: () => void;
-  readonly #getMany: PreparedStatement;
+  readonly #preparedStatements: PreparedStatements;
   #closed = false;
-  // Flat striped array: [isGet, key, resolve, reject, ...]
-  #pending: unknown[] = [];
+  // Flat striped arrays: [key, resolve, reject, ...]
+  #pendingGets: unknown[] = [];
+  #pendingHas: unknown[] = [];
   #scheduled = false;
 
   constructor(release: () => void, preparedStatements: PreparedStatements) {
     this.#release = release;
-    this.#getMany = preparedStatements.getMany;
+    this.#preparedStatements = preparedStatements;
   }
 
   has(key: string): Promise<boolean> {
     return (
       maybeTransactionIsClosedRejection(this) ??
       new Promise((resolve, reject) => {
-        this.#pending.push(false, key, resolve, reject);
+        this.#pendingHas.push(key, resolve, reject);
         this.#scheduleLookup();
       })
     );
@@ -268,7 +334,7 @@ export class SQLiteStoreRead implements Read {
     return (
       maybeTransactionIsClosedRejection(this) ??
       new Promise((resolve, reject) => {
-        this.#pending.push(true, key, resolve, reject);
+        this.#pendingGets.push(key, resolve, reject);
         this.#scheduleLookup();
       })
     );
@@ -279,7 +345,11 @@ export class SQLiteStoreRead implements Read {
       this.#scheduled = true;
       queueMicrotask(() => {
         this.#scheduled = false;
-        void flushLookups(this.#pending.splice(0), this.#getMany);
+        const {get, has, getMany, hasMany} = this.#preparedStatements;
+        const gets = this.#pendingGets.splice(0);
+        const hass = this.#pendingHas.splice(0);
+        if (gets.length > 0) void flushGets(gets, get, getMany);
+        if (hass.length > 0) void flushHas(hass, has, hasMany);
       });
     }
   }
@@ -302,8 +372,9 @@ export class SQLiteWrite implements Write {
   readonly #preparedStatements: PreparedStatements;
   #committed = false;
   #closed = false;
-  // Flat striped array: [isGet, key, resolve, reject, ...]
-  #pending: unknown[] = [];
+  // Flat striped arrays: [key, resolve, reject, ...]
+  #pendingGets: unknown[] = [];
+  #pendingHas: unknown[] = [];
   #scheduled = false;
 
   constructor(
@@ -320,7 +391,7 @@ export class SQLiteWrite implements Write {
     return (
       maybeTransactionIsClosedRejection(this) ??
       new Promise((resolve, reject) => {
-        this.#pending.push(false, key, resolve, reject);
+        this.#pendingHas.push(key, resolve, reject);
         this.#scheduleLookup();
       })
     );
@@ -330,7 +401,7 @@ export class SQLiteWrite implements Write {
     return (
       maybeTransactionIsClosedRejection(this) ??
       new Promise((resolve, reject) => {
-        this.#pending.push(true, key, resolve, reject);
+        this.#pendingGets.push(key, resolve, reject);
         this.#scheduleLookup();
       })
     );
@@ -341,10 +412,11 @@ export class SQLiteWrite implements Write {
       this.#scheduled = true;
       queueMicrotask(() => {
         this.#scheduled = false;
-        void flushLookups(
-          this.#pending.splice(0),
-          this.#preparedStatements.getMany,
-        );
+        const {get, has, getMany, hasMany} = this.#preparedStatements;
+        const gets = this.#pendingGets.splice(0);
+        const hass = this.#pendingHas.splice(0);
+        if (gets.length > 0) void flushGets(gets, get, getMany);
+        if (hass.length > 0) void flushHas(hass, has, hasMany);
       });
     }
   }
