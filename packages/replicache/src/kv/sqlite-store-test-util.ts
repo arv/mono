@@ -90,7 +90,7 @@ export function runSQLiteStoreTests<TOptions = unknown>(
   runAll(storeName, () => createStoreWithDefaults(`test-${++storeCounter}`));
 
   // SQLite-specific tests
-  test('batches concurrent get and has calls into a single query', async () => {
+  test('concurrent get and has calls return correct results', async () => {
     const store = createStoreWithDefaults(`batch-test-${++storeCounter}`);
 
     await withWrite(store, async wt => {
@@ -99,7 +99,6 @@ export function runSQLiteStoreTests<TOptions = unknown>(
     });
 
     await withRead(store, async rt => {
-      // Fire all lookups without awaiting — they should be batched into one query
       const [valA, valB, hasA, hasC] = await Promise.all([
         rt.get('a'),
         rt.get('b'),
@@ -112,7 +111,6 @@ export function runSQLiteStoreTests<TOptions = unknown>(
       expect(hasC).toBe(false);
     });
 
-    // Same via write transaction
     await withWrite(store, async wt => {
       const [valA, hasB] = await Promise.all([wt.get('a'), wt.has('b')]);
       expect(valA).toBe('alpha');

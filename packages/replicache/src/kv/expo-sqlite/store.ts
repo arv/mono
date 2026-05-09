@@ -40,12 +40,6 @@ class ExpoSQLitePreparedStatement implements PreparedStatement {
     this.#statement = statement;
   }
 
-  async firstValue(params: string[]): Promise<string | undefined> {
-    const result = await this.#statement.executeForRawResultAsync(params);
-    const row = await result.getFirstAsync();
-    return row === null ? undefined : row[0];
-  }
-
   async exec(params: string[]): Promise<void> {
     await this.#statement.executeForRawResultAsync(params);
   }

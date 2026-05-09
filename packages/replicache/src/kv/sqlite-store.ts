@@ -10,13 +10,8 @@ import {
 
 /**
  * A SQLite prepared statement.
- *
- * `run` executes the statement with optional parameters.
- * `all` executes the statement and returns the result rows.
- * `finalize` releases the statement.
  */
 export interface PreparedStatement {
-  firstValue(params: string[]): Promise<unknown>;
   exec(params: string[]): Promise<void>;
   all(params: string[]): Promise<unknown[][]>;
 }
@@ -133,8 +128,6 @@ export function safeFilename(name: string): string {
 }
 
 export type PreparedStatements = {
-  has: PreparedStatement;
-  get: PreparedStatement;
   put: PreparedStatement;
   del: PreparedStatement;
   getMany: PreparedStatement;
@@ -176,8 +169,6 @@ export function setupDatabase(
 
   // Prepare common statements
   return {
-    has: delegate.prepare(`SELECT 1 FROM entry WHERE key = ? LIMIT 1`),
-    get: delegate.prepare('SELECT value FROM entry WHERE key = ?'),
     put: delegate.prepare(
       'INSERT OR REPLACE INTO entry (key, value) VALUES (?, ?)',
     ),
@@ -199,42 +190,16 @@ const PENDING_REJECT = 2;
 
 async function flushGets(
   pending: unknown[],
-  getSingle: PreparedStatement,
   getMany: PreparedStatement,
 ): Promise<void> {
-  if (pending.length === PENDING_STRIDE) {
-    const key = pending[PENDING_KEY] as string;
-    const resolve = pending[PENDING_RESOLVE] as (
-      v: ReadonlyJSONValue | undefined,
-    ) => void;
-    const reject = pending[PENDING_REJECT] as (e: unknown) => void;
-    let raw: unknown;
-    try {
-      raw = await getSingle.firstValue([key]);
-    } catch (e) {
-      reject(e);
-      return;
-    }
-    try {
-      resolve(
-        raw === undefined
-          ? undefined
-          : deepFreeze(JSON.parse(raw as string) as ReadonlyJSONValue),
-      );
-    } catch (e) {
-      reject(e);
-    }
-    return;
-  }
-
-  const keySet = new Set<string>();
+  const keys: unknown[] = [];
   for (let i = PENDING_KEY; i < pending.length; i += PENDING_STRIDE) {
-    keySet.add(pending[i] as string);
+    keys.push(pending[i]);
   }
 
   let rows: unknown[][];
   try {
-    rows = await getMany.all([JSON.stringify([...keySet])]);
+    rows = await getMany.all([JSON.stringify(keys)]);
   } catch (e) {
     for (let i = PENDING_REJECT; i < pending.length; i += PENDING_STRIDE) {
       (pending[i] as (e: unknown) => void)(e);
@@ -268,29 +233,16 @@ async function flushGets(
 
 async function flushHas(
   pending: unknown[],
-  hasSingle: PreparedStatement,
   hasMany: PreparedStatement,
 ): Promise<void> {
-  if (pending.length === PENDING_STRIDE) {
-    const key = pending[PENDING_KEY] as string;
-    const resolve = pending[PENDING_RESOLVE] as (v: boolean) => void;
-    const reject = pending[PENDING_REJECT] as (e: unknown) => void;
-    try {
-      resolve((await hasSingle.firstValue([key])) !== undefined);
-    } catch (e) {
-      reject(e);
-    }
-    return;
-  }
-
-  const keySet = new Set<string>();
+  const keys: unknown[] = [];
   for (let i = PENDING_KEY; i < pending.length; i += PENDING_STRIDE) {
-    keySet.add(pending[i] as string);
+    keys.push(pending[i]);
   }
 
   let rows: unknown[][];
   try {
-    rows = await hasMany.all([JSON.stringify([...keySet])]);
+    rows = await hasMany.all([JSON.stringify(keys)]);
   } catch (e) {
     for (let i = PENDING_REJECT; i < pending.length; i += PENDING_STRIDE) {
       (pending[i] as (e: unknown) => void)(e);
@@ -345,11 +297,11 @@ export class SQLiteStoreRead implements Read {
       this.#scheduled = true;
       queueMicrotask(() => {
         this.#scheduled = false;
-        const {get, has, getMany, hasMany} = this.#preparedStatements;
+        const {getMany, hasMany} = this.#preparedStatements;
         const gets = this.#pendingGets.splice(0);
         const hass = this.#pendingHas.splice(0);
-        if (gets.length > 0) void flushGets(gets, get, getMany);
-        if (hass.length > 0) void flushHas(hass, has, hasMany);
+        if (gets.length > 0) void flushGets(gets, getMany);
+        if (hass.length > 0) void flushHas(hass, hasMany);
       });
     }
   }
@@ -370,12 +322,8 @@ export class SQLiteWrite implements Write {
   readonly #release: () => void;
   readonly #dbDelegate: SQLiteDatabase;
   readonly #preparedStatements: PreparedStatements;
+  readonly #read: SQLiteStoreRead;
   #committed = false;
-  #closed = false;
-  // Flat striped arrays: [key, resolve, reject, ...]
-  #pendingGets: unknown[] = [];
-  #pendingHas: unknown[] = [];
-  #scheduled = false;
 
   constructor(
     release: () => void,
@@ -385,40 +333,15 @@ export class SQLiteWrite implements Write {
     this.#release = release;
     this.#dbDelegate = dbDelegate;
     this.#preparedStatements = preparedStatements;
+    this.#read = new SQLiteStoreRead(() => {}, preparedStatements);
   }
 
   has(key: string): Promise<boolean> {
-    return (
-      maybeTransactionIsClosedRejection(this) ??
-      new Promise((resolve, reject) => {
-        this.#pendingHas.push(key, resolve, reject);
-        this.#scheduleLookup();
-      })
-    );
+    return this.#read.has(key);
   }
 
   get(key: string): Promise<ReadonlyJSONValue | undefined> {
-    return (
-      maybeTransactionIsClosedRejection(this) ??
-      new Promise((resolve, reject) => {
-        this.#pendingGets.push(key, resolve, reject);
-        this.#scheduleLookup();
-      })
-    );
-  }
-
-  #scheduleLookup(): void {
-    if (!this.#scheduled) {
-      this.#scheduled = true;
-      queueMicrotask(() => {
-        this.#scheduled = false;
-        const {get, has, getMany, hasMany} = this.#preparedStatements;
-        const gets = this.#pendingGets.splice(0);
-        const hass = this.#pendingHas.splice(0);
-        if (gets.length > 0) void flushGets(gets, get, getMany);
-        if (hass.length > 0) void flushHas(hass, has, hasMany);
-      });
-    }
+    return this.#read.get(key);
   }
 
   async put(key: string, value: ReadonlyJSONValue): Promise<void> {
@@ -439,19 +362,17 @@ export class SQLiteWrite implements Write {
   }
 
   release(): void {
-    if (!this.#closed) {
-      this.#closed = true;
-
+    if (!this.closed) {
+      this.#read.release();
       if (!this.#committed) {
         this.#dbDelegate.execSync('ROLLBACK');
       }
-
       this.#release();
     }
   }
 
   get closed(): boolean {
-    return this.#closed;
+    return this.#read.closed;
   }
 }
 

@@ -38,23 +38,13 @@ class ZeroSQLitePreparedStatement implements PreparedStatement {
   }
 
   // oxlint-disable-next-line require-await
-  async firstValue(params: string[]): Promise<unknown | undefined> {
-    const result = this.#statement.all(...params);
-    if (result === undefined || result.length === 0) {
-      return undefined;
-    }
-    return Object.values(result[0] as Record<string, unknown>)[0];
-  }
-
-  // oxlint-disable-next-line require-await
   async exec(params: string[]): Promise<void> {
     this.#statement.run(params);
   }
 
   // oxlint-disable-next-line require-await
   async all(params: string[]): Promise<unknown[][]> {
-    const rows = this.#statement.all(...params) as Record<string, unknown>[];
-    return rows.map(row => Object.values(row));
+    return this.#statement.raw(true).all(...params) as unknown[][];
   }
 }
 

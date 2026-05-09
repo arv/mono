@@ -49,11 +49,6 @@ class OpSQLitePreparedStatement implements PreparedStatement {
     this.#sql = sql;
   }
 
-  async firstValue(params: string[]): Promise<string | undefined> {
-    const rows = await this.#db.executeRaw(this.#sql, params);
-    return rows[0]?.[0];
-  }
-
   async exec(params: string[]): Promise<void> {
     await this.#db.executeRaw(this.#sql, params);
   }
