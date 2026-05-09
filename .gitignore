@@ -10,12 +10,6 @@ logs
 *.db-shm
 *.db-wal
 *.db-wal2
-# test-generated sqlite files (no extension)
-zero_*_test_*
-zero_test_*
-drop_test_*
-pragma_test_*
-batch_test_*
 
 # turbo
 .turbo
