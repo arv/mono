@@ -203,10 +203,11 @@ const CB_STRIDE = 2;
 const CB_RESOLVE = 0;
 const CB_REJECT = 1;
 
-async function flushSingleGet(
+async function flushSingle(
   key: string,
   callbacks: unknown[],
   stmt: PreparedStatement,
+  settle: (rows: unknown[][], callbacks: unknown[]) => void,
 ): Promise<void> {
   let rows: unknown[][];
   try {
@@ -215,6 +216,10 @@ async function flushSingleGet(
     (callbacks[CB_REJECT] as (e: unknown) => void)(e);
     return;
   }
+  settle(rows, callbacks);
+}
+
+function settleSingleGet(rows: unknown[][], callbacks: unknown[]): void {
   const raw = rows[0]?.[0] as string | undefined;
   try {
     (callbacks[CB_RESOLVE] as (v: ReadonlyJSONValue | undefined) => void)(
@@ -227,18 +232,7 @@ async function flushSingleGet(
   }
 }
 
-async function flushSingleHas(
-  key: string,
-  callbacks: unknown[],
-  stmt: PreparedStatement,
-): Promise<void> {
-  let rows: unknown[][];
-  try {
-    rows = await stmt.all([key]);
-  } catch (e) {
-    (callbacks[CB_REJECT] as (e: unknown) => void)(e);
-    return;
-  }
+function settleSingleHas(rows: unknown[][], callbacks: unknown[]): void {
   (callbacks[CB_RESOLVE] as (v: boolean) => void)(rows.length > 0);
 }
 
@@ -346,12 +340,12 @@ export class SQLiteStoreRead implements Read {
         const hasKeys = this.#pendingHasKeys.splice(0);
         const hasCallbacks = this.#pendingHasCallbacks.splice(0);
         if (getKeys.length === 1) {
-          void flushSingleGet(getKeys[0], getCallbacks, get);
+          void flushSingle(getKeys[0], getCallbacks, get, settleSingleGet);
         } else if (getKeys.length > 1) {
           void flushBatch(getKeys, getCallbacks, getMany, settleGets);
         }
         if (hasKeys.length === 1) {
-          void flushSingleHas(hasKeys[0], hasCallbacks, has);
+          void flushSingle(hasKeys[0], hasCallbacks, has, settleSingleHas);
         } else if (hasKeys.length > 1) {
           void flushBatch(hasKeys, hasCallbacks, hasMany, settleHas);
         }
