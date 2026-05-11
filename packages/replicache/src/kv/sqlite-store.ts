@@ -198,11 +198,9 @@ export function setupDatabase(
   };
 }
 
-type Pending<T> = {
-  key: string;
-  resolve: (v: T) => void;
-  reject: (e: unknown) => void;
-};
+type GetResolve = (v: ReadonlyJSONValue | undefined) => void;
+type HasResolve = (v: boolean) => void;
+type Reject = (e: unknown) => void;
 
 function parseRawValue(raw: string | undefined): ReadonlyJSONValue | undefined {
   return raw === undefined
@@ -211,8 +209,8 @@ function parseRawValue(raw: string | undefined): ReadonlyJSONValue | undefined {
 }
 
 function resolveGet(
-  resolve: (v: ReadonlyJSONValue | undefined) => void,
-  reject: (e: unknown) => void,
+  resolve: GetResolve,
+  reject: Reject,
   raw: string | undefined,
 ): void {
   try {
@@ -222,65 +220,58 @@ function resolveGet(
   }
 }
 
-async function flushSingle<T>(
-  pending: Pending<T>,
+async function flushSingle(
+  key: string,
+  reject: Reject,
   stmt: PreparedStatement,
-  settle: (rows: unknown[][], pending: Pending<T>) => void,
+  settle: (rows: unknown[][]) => void,
 ): Promise<void> {
   let rows: unknown[][];
   try {
-    rows = await stmt.all([pending.key]);
+    rows = await stmt.all([key]);
   } catch (e) {
-    pending.reject(e);
+    reject(e);
     return;
   }
-  settle(rows, pending);
+  settle(rows);
 }
 
-async function flushBatch<T>(
-  pendings: Pending<T>[],
+async function flushBatch(
+  keys: string[],
+  rejects: Reject[],
   stmt: PreparedStatement,
-  settle: (rows: unknown[][], pendings: Pending<T>[]) => void,
+  settle: (rows: unknown[][]) => void,
 ): Promise<void> {
   let rows: unknown[][];
   try {
-    rows = await stmt.all([JSON.stringify(pendings.map(p => p.key))]);
+    rows = await stmt.all([JSON.stringify(keys)]);
   } catch (e) {
-    for (const p of pendings) p.reject(e);
+    for (const r of rejects) r(e);
     return;
   }
-  settle(rows, pendings);
-}
-
-function settleSingleGet(
-  rows: unknown[][],
-  pending: Pending<ReadonlyJSONValue | undefined>,
-): void {
-  resolveGet(
-    pending.resolve,
-    pending.reject,
-    rows[0]?.[0] as string | undefined,
-  );
-}
-
-function settleSingleHas(rows: unknown[][], pending: Pending<boolean>): void {
-  pending.resolve(rows.length > 0);
+  settle(rows);
 }
 
 function settleGets(
   rows: unknown[][],
-  pendings: Pending<ReadonlyJSONValue | undefined>[],
+  keys: string[],
+  resolves: GetResolve[],
+  rejects: Reject[],
 ): void {
   const resultMap = new Map(rows as [string, string][]);
-  for (const p of pendings) {
-    resolveGet(p.resolve, p.reject, resultMap.get(p.key));
+  for (let i = 0; i < keys.length; i++) {
+    resolveGet(resolves[i], rejects[i], resultMap.get(keys[i]));
   }
 }
 
-function settleHas(rows: unknown[][], pendings: Pending<boolean>[]): void {
+function settleHas(
+  rows: unknown[][],
+  keys: string[],
+  resolves: HasResolve[],
+): void {
   const existingKeys = new Set(rows.map(row => row[0] as string));
-  for (const p of pendings) {
-    p.resolve(existingKeys.has(p.key));
+  for (let i = 0; i < keys.length; i++) {
+    resolves[i](existingKeys.has(keys[i]));
   }
 }
 
@@ -288,8 +279,12 @@ export class SQLiteStoreRead implements Read {
   readonly #release: () => void;
   readonly #preparedStatements: PreparedStatements;
   #closed = false;
-  #pendingGets: Pending<ReadonlyJSONValue | undefined>[] = [];
-  #pendingHas: Pending<boolean>[] = [];
+  #pendingGetKeys: string[] = [];
+  #pendingGetResolves: GetResolve[] = [];
+  #pendingGetRejects: Reject[] = [];
+  #pendingHasKeys: string[] = [];
+  #pendingHasResolves: HasResolve[] = [];
+  #pendingHasRejects: Reject[] = [];
   #scheduled = false;
 
   constructor(release: () => void, preparedStatements: PreparedStatements) {
@@ -301,7 +296,9 @@ export class SQLiteStoreRead implements Read {
     return (
       maybeTransactionIsClosedRejection(this) ??
       new Promise((resolve, reject) => {
-        this.#pendingHas.push({key, resolve, reject});
+        this.#pendingHasKeys.push(key);
+        this.#pendingHasResolves.push(resolve);
+        this.#pendingHasRejects.push(reject);
         this.#scheduleLookup();
       })
     );
@@ -311,7 +308,9 @@ export class SQLiteStoreRead implements Read {
     return (
       maybeTransactionIsClosedRejection(this) ??
       new Promise((resolve, reject) => {
-        this.#pendingGets.push({key, resolve, reject});
+        this.#pendingGetKeys.push(key);
+        this.#pendingGetResolves.push(resolve);
+        this.#pendingGetRejects.push(reject);
         this.#scheduleLookup();
       })
     );
@@ -323,17 +322,33 @@ export class SQLiteStoreRead implements Read {
       queueMicrotask(() => {
         this.#scheduled = false;
         const {get, has, getMany, hasMany} = this.#preparedStatements;
-        const gets = this.#pendingGets.splice(0);
-        const hass = this.#pendingHas.splice(0);
-        if (gets.length === 1) {
-          void flushSingle(gets[0], get, settleSingleGet);
-        } else if (gets.length > 1) {
-          void flushBatch(gets, getMany, settleGets);
+        const getKeys = this.#pendingGetKeys.splice(0);
+        const getResolves = this.#pendingGetResolves.splice(0);
+        const getRejects = this.#pendingGetRejects.splice(0);
+        const hasKeys = this.#pendingHasKeys.splice(0);
+        const hasResolves = this.#pendingHasResolves.splice(0);
+        const hasRejects = this.#pendingHasRejects.splice(0);
+        if (getKeys.length === 1) {
+          void flushSingle(getKeys[0], getRejects[0], get, rows =>
+            resolveGet(
+              getResolves[0],
+              getRejects[0],
+              rows[0]?.[0] as string | undefined,
+            ),
+          );
+        } else if (getKeys.length > 1) {
+          void flushBatch(getKeys, getRejects, getMany, rows =>
+            settleGets(rows, getKeys, getResolves, getRejects),
+          );
         }
-        if (hass.length === 1) {
-          void flushSingle(hass[0], has, settleSingleHas);
-        } else if (hass.length > 1) {
-          void flushBatch(hass, hasMany, settleHas);
+        if (hasKeys.length === 1) {
+          void flushSingle(hasKeys[0], hasRejects[0], has, rows =>
+            hasResolves[0](rows.length > 0),
+          );
+        } else if (hasKeys.length > 1) {
+          void flushBatch(hasKeys, hasRejects, hasMany, rows =>
+            settleHas(rows, hasKeys, hasResolves),
+          );
         }
       });
     }
