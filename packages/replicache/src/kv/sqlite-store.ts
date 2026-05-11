@@ -209,6 +209,18 @@ function parseRawValue(raw: string | undefined): ReadonlyJSONValue | undefined {
     : deepFreeze(JSON.parse(raw) as ReadonlyJSONValue);
 }
 
+function resolveGet(
+  resolve: (v: ReadonlyJSONValue | undefined) => void,
+  reject: (e: unknown) => void,
+  raw: string | undefined,
+): void {
+  try {
+    resolve(parseRawValue(raw));
+  } catch (e) {
+    reject(e);
+  }
+}
+
 async function flushSingle(
   key: string,
   callbacks: unknown[],
@@ -226,14 +238,11 @@ async function flushSingle(
 }
 
 function settleSingleGet(rows: unknown[][], callbacks: unknown[]): void {
-  const raw = rows[0]?.[0] as string | undefined;
-  try {
-    (callbacks[CB_RESOLVE] as (v: ReadonlyJSONValue | undefined) => void)(
-      parseRawValue(raw),
-    );
-  } catch (e) {
-    (callbacks[CB_REJECT] as (e: unknown) => void)(e);
-  }
+  resolveGet(
+    callbacks[CB_RESOLVE] as (v: ReadonlyJSONValue | undefined) => void,
+    callbacks[CB_REJECT] as (e: unknown) => void,
+    rows[0]?.[0] as string | undefined,
+  );
 }
 
 function settleSingleHas(rows: unknown[][], callbacks: unknown[]): void {
@@ -265,16 +274,13 @@ function settleGets(
 ): void {
   const resultMap = new Map(rows as [string, string][]);
   for (let i = 0; i < keys.length; i++) {
-    const raw = resultMap.get(keys[i]);
-    try {
-      (
-        callbacks[i * CB_STRIDE + CB_RESOLVE] as (
-          v: ReadonlyJSONValue | undefined,
-        ) => void
-      )(parseRawValue(raw));
-    } catch (e) {
-      (callbacks[i * CB_STRIDE + CB_REJECT] as (e: unknown) => void)(e);
-    }
+    resolveGet(
+      callbacks[i * CB_STRIDE + CB_RESOLVE] as (
+        v: ReadonlyJSONValue | undefined,
+      ) => void,
+      callbacks[i * CB_STRIDE + CB_REJECT] as (e: unknown) => void,
+      resultMap.get(keys[i]),
+    );
   }
 }
 
