@@ -203,6 +203,12 @@ const CB_STRIDE = 2;
 const CB_RESOLVE = 0;
 const CB_REJECT = 1;
 
+function parseRawValue(raw: string | undefined): ReadonlyJSONValue | undefined {
+  return raw === undefined
+    ? undefined
+    : deepFreeze(JSON.parse(raw) as ReadonlyJSONValue);
+}
+
 async function flushSingle(
   key: string,
   callbacks: unknown[],
@@ -223,9 +229,7 @@ function settleSingleGet(rows: unknown[][], callbacks: unknown[]): void {
   const raw = rows[0]?.[0] as string | undefined;
   try {
     (callbacks[CB_RESOLVE] as (v: ReadonlyJSONValue | undefined) => void)(
-      raw === undefined
-        ? undefined
-        : deepFreeze(JSON.parse(raw) as ReadonlyJSONValue),
+      parseRawValue(raw),
     );
   } catch (e) {
     (callbacks[CB_REJECT] as (e: unknown) => void)(e);
@@ -267,11 +271,7 @@ function settleGets(
         callbacks[i * CB_STRIDE + CB_RESOLVE] as (
           v: ReadonlyJSONValue | undefined,
         ) => void
-      )(
-        raw === undefined
-          ? undefined
-          : deepFreeze(JSON.parse(raw) as ReadonlyJSONValue),
-      );
+      )(parseRawValue(raw));
     } catch (e) {
       (callbacks[i * CB_STRIDE + CB_REJECT] as (e: unknown) => void)(e);
     }
