@@ -198,10 +198,11 @@ export function setupDatabase(
   };
 }
 
-// Callbacks are stored as striped pairs: [resolve, reject, resolve, reject, ...]
-const CB_STRIDE = 2;
-const CB_RESOLVE = 0;
-const CB_REJECT = 1;
+type Pending<T> = {
+  key: string;
+  resolve: (v: T) => void;
+  reject: (e: unknown) => void;
+};
 
 function parseRawValue(raw: string | undefined): ReadonlyJSONValue | undefined {
   return raw === undefined
@@ -221,80 +222,65 @@ function resolveGet(
   }
 }
 
-async function flushSingle(
-  key: string,
-  callbacks: unknown[],
+async function flushSingle<T>(
+  pending: Pending<T>,
   stmt: PreparedStatement,
-  settle: (rows: unknown[][], callbacks: unknown[]) => void,
+  settle: (rows: unknown[][], pending: Pending<T>) => void,
 ): Promise<void> {
   let rows: unknown[][];
   try {
-    rows = await stmt.all([key]);
+    rows = await stmt.all([pending.key]);
   } catch (e) {
-    (callbacks[CB_REJECT] as (e: unknown) => void)(e);
+    pending.reject(e);
     return;
   }
-  settle(rows, callbacks);
+  settle(rows, pending);
 }
 
-function settleSingleGet(rows: unknown[][], callbacks: unknown[]): void {
+async function flushBatch<T>(
+  pendings: Pending<T>[],
+  stmt: PreparedStatement,
+  settle: (rows: unknown[][], pendings: Pending<T>[]) => void,
+): Promise<void> {
+  let rows: unknown[][];
+  try {
+    rows = await stmt.all([JSON.stringify(pendings.map(p => p.key))]);
+  } catch (e) {
+    for (const p of pendings) p.reject(e);
+    return;
+  }
+  settle(rows, pendings);
+}
+
+function settleSingleGet(
+  rows: unknown[][],
+  pending: Pending<ReadonlyJSONValue | undefined>,
+): void {
   resolveGet(
-    callbacks[CB_RESOLVE] as (v: ReadonlyJSONValue | undefined) => void,
-    callbacks[CB_REJECT] as (e: unknown) => void,
+    pending.resolve,
+    pending.reject,
     rows[0]?.[0] as string | undefined,
   );
 }
 
-function settleSingleHas(rows: unknown[][], callbacks: unknown[]): void {
-  (callbacks[CB_RESOLVE] as (v: boolean) => void)(rows.length > 0);
-}
-
-async function flushBatch(
-  keys: string[],
-  callbacks: unknown[],
-  stmt: PreparedStatement,
-  settle: (keys: string[], callbacks: unknown[], rows: unknown[][]) => void,
-): Promise<void> {
-  let rows: unknown[][];
-  try {
-    rows = await stmt.all([JSON.stringify(keys)]);
-  } catch (e) {
-    for (let i = CB_REJECT; i < callbacks.length; i += CB_STRIDE) {
-      (callbacks[i] as (e: unknown) => void)(e);
-    }
-    return;
-  }
-  settle(keys, callbacks, rows);
+function settleSingleHas(rows: unknown[][], pending: Pending<boolean>): void {
+  pending.resolve(rows.length > 0);
 }
 
 function settleGets(
-  keys: string[],
-  callbacks: unknown[],
   rows: unknown[][],
+  pendings: Pending<ReadonlyJSONValue | undefined>[],
 ): void {
   const resultMap = new Map(rows as [string, string][]);
-  for (let i = 0; i < keys.length; i++) {
-    resolveGet(
-      callbacks[i * CB_STRIDE + CB_RESOLVE] as (
-        v: ReadonlyJSONValue | undefined,
-      ) => void,
-      callbacks[i * CB_STRIDE + CB_REJECT] as (e: unknown) => void,
-      resultMap.get(keys[i]),
-    );
+  for (const p of pendings) {
+    resolveGet(p.resolve, p.reject, resultMap.get(p.key));
   }
 }
 
-function settleHas(
-  keys: string[],
-  callbacks: unknown[],
-  rows: unknown[][],
-): void {
+function settleHas(rows: unknown[][], pendings: Pending<boolean>[]): void {
   const existingKeys = new Set(rows.map(row => row[0] as string));
-  for (let i = 0; i < keys.length; i++) {
-    const resolve = callbacks[i * CB_STRIDE + CB_RESOLVE] as (
-      v: boolean,
-    ) => void;
-    resolve(existingKeys.has(keys[i]));
+  for (const p of pendings) {
+    p.resolve(existingKeys.has(p.key));
   }
 }
 
@@ -302,10 +288,8 @@ export class SQLiteStoreRead implements Read {
   readonly #release: () => void;
   readonly #preparedStatements: PreparedStatements;
   #closed = false;
-  #pendingGetKeys: string[] = [];
-  #pendingGetCallbacks: unknown[] = [];
-  #pendingHasKeys: string[] = [];
-  #pendingHasCallbacks: unknown[] = [];
+  #pendingGets: Pending<ReadonlyJSONValue | undefined>[] = [];
+  #pendingHas: Pending<boolean>[] = [];
   #scheduled = false;
 
   constructor(release: () => void, preparedStatements: PreparedStatements) {
@@ -317,8 +301,7 @@ export class SQLiteStoreRead implements Read {
     return (
       maybeTransactionIsClosedRejection(this) ??
       new Promise((resolve, reject) => {
-        this.#pendingHasKeys.push(key);
-        this.#pendingHasCallbacks.push(resolve, reject);
+        this.#pendingHas.push({key, resolve, reject});
         this.#scheduleLookup();
       })
     );
@@ -328,8 +311,7 @@ export class SQLiteStoreRead implements Read {
     return (
       maybeTransactionIsClosedRejection(this) ??
       new Promise((resolve, reject) => {
-        this.#pendingGetKeys.push(key);
-        this.#pendingGetCallbacks.push(resolve, reject);
+        this.#pendingGets.push({key, resolve, reject});
         this.#scheduleLookup();
       })
     );
@@ -341,19 +323,17 @@ export class SQLiteStoreRead implements Read {
       queueMicrotask(() => {
         this.#scheduled = false;
         const {get, has, getMany, hasMany} = this.#preparedStatements;
-        const getKeys = this.#pendingGetKeys.splice(0);
-        const getCallbacks = this.#pendingGetCallbacks.splice(0);
-        const hasKeys = this.#pendingHasKeys.splice(0);
-        const hasCallbacks = this.#pendingHasCallbacks.splice(0);
-        if (getKeys.length === 1) {
-          void flushSingle(getKeys[0], getCallbacks, get, settleSingleGet);
-        } else if (getKeys.length > 1) {
-          void flushBatch(getKeys, getCallbacks, getMany, settleGets);
+        const gets = this.#pendingGets.splice(0);
+        const hass = this.#pendingHas.splice(0);
+        if (gets.length === 1) {
+          void flushSingle(gets[0], get, settleSingleGet);
+        } else if (gets.length > 1) {
+          void flushBatch(gets, getMany, settleGets);
         }
-        if (hasKeys.length === 1) {
-          void flushSingle(hasKeys[0], hasCallbacks, has, settleSingleHas);
-        } else if (hasKeys.length > 1) {
-          void flushBatch(hasKeys, hasCallbacks, hasMany, settleHas);
+        if (hass.length === 1) {
+          void flushSingle(hass[0], has, settleSingleHas);
+        } else if (hass.length > 1) {
+          void flushBatch(hass, hasMany, settleHas);
         }
       });
     }
