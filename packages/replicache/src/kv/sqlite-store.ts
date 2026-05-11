@@ -59,7 +59,7 @@ export class SQLiteStore implements Store {
     create: CreateSQLiteDatabase,
     opts?: SQLiteStoreOptions,
   ) {
-    this.#filename = safeFilename(name);
+    this.#filename = resolveFilename(name, opts);
     this.#entry = getOrCreateEntry(name, create, opts);
   }
 
@@ -127,6 +127,12 @@ export function safeFilename(name: string): string {
   return name.replace(/[^a-zA-Z0-9]/g, '_');
 }
 
+function resolveFilename(name: string, opts?: SQLiteStoreOptions): string {
+  const safe = safeFilename(name);
+  const dir = opts?.directory;
+  return dir ? `${dir}/${safe}` : safe;
+}
+
 export type PreparedStatements = {
   has: PreparedStatement;
   get: PreparedStatement;
@@ -142,6 +148,8 @@ export interface SQLiteStoreOptions {
   journalMode?: 'WAL' | 'DELETE';
   synchronous?: 'NORMAL' | 'FULL';
   readUncommitted?: boolean;
+  /** Directory in which to create the SQLite file. Defaults to the process CWD. */
+  directory?: string | undefined;
 }
 
 /**
@@ -438,7 +446,7 @@ function getOrCreateEntry(
   create: (filename: string, opts?: SQLiteStoreOptions) => SQLiteDatabase,
   opts?: SQLiteStoreOptions,
 ): StoreEntry {
-  const filename = safeFilename(name);
+  const filename = resolveFilename(name, opts);
   const entry = stores.get(filename);
 
   if (entry) {
@@ -493,8 +501,9 @@ export function dropStore(
     filename: string,
     opts?: SQLiteStoreOptions,
   ) => SQLiteDatabase,
+  opts?: SQLiteStoreOptions,
 ): Promise<void> {
-  const filename = safeFilename(name);
+  const filename = resolveFilename(name, opts);
   const entry = stores.get(filename);
   if (entry) {
     try {

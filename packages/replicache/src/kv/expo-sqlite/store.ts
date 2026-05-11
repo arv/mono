@@ -14,8 +14,11 @@ import type {StoreProvider} from '../store.ts';
 
 export type ExpoSQLiteStoreOptions = SQLiteStoreOptions;
 
-export function dropExpoSQLiteStore(name: string): Promise<void> {
-  return dropStore(name, filename => new ExpoSQLiteDatabase(filename));
+export function dropExpoSQLiteStore(
+  name: string,
+  opts?: ExpoSQLiteStoreOptions,
+): Promise<void> {
+  return dropStore(name, filename => new ExpoSQLiteDatabase(filename), opts);
 }
 
 /**
@@ -29,7 +32,7 @@ export function expoSQLiteStoreProvider(
   return {
     create: name =>
       new SQLiteStore(name, name => new ExpoSQLiteDatabase(name), opts),
-    drop: dropExpoSQLiteStore,
+    drop: name => dropExpoSQLiteStore(name, opts),
   };
 }
 

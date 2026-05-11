@@ -11,8 +11,11 @@ export {safeFilename} from '../sqlite-store.ts';
 
 export type ZeroSQLiteStoreOptions = SQLiteStoreOptions;
 
-export function dropZeroSQLiteStore(name: string): Promise<void> {
-  return dropStore(name, filename => new ZeroSQLiteDatabase(filename));
+export function dropZeroSQLiteStore(
+  name: string,
+  opts?: ZeroSQLiteStoreOptions,
+): Promise<void> {
+  return dropStore(name, filename => new ZeroSQLiteDatabase(filename), opts);
 }
 
 /**
@@ -26,7 +29,7 @@ export function zeroSQLiteStoreProvider(
   return {
     create: name =>
       new SQLiteStore(name, name => new ZeroSQLiteDatabase(name), opts),
-    drop: dropZeroSQLiteStore,
+    drop: name => dropZeroSQLiteStore(name, opts),
   };
 }
 

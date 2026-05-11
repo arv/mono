@@ -13,10 +13,14 @@ export type OpSQLiteStoreOptions = SQLiteStoreOptions & {
   encryptionKey?: string;
 };
 
-function dropOpSQLiteStore(name: string): Promise<void> {
+function dropOpSQLiteStore(
+  name: string,
+  opts?: OpSQLiteStoreOptions,
+): Promise<void> {
   return dropStore(
     name,
-    (filename, opts) => new OpSQLiteDatabase(filename, opts),
+    (filename, options) => new OpSQLiteDatabase(filename, options),
+    opts,
   );
 }
 
@@ -36,7 +40,7 @@ export function opSQLiteStoreProvider(
         (name, options) => new OpSQLiteDatabase(name, options),
         opts,
       ),
-    drop: dropOpSQLiteStore,
+    drop: name => dropOpSQLiteStore(name, opts),
   };
 }
 
