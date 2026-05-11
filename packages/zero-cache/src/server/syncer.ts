@@ -70,32 +70,34 @@ export default function runWorker(
   env: NodeJS.ProcessEnv,
   ...args: string[]
 ): Promise<void> {
-  const config = getNormalizedZeroConfig({env, argv: args.slice(1)});
-
-  startOtelAuto(createLogContext(config, {worker: 'syncer'}, false));
-  const lc = createLogContext(config, {worker: 'syncer'}, true);
-  initEventSink(lc, config);
-
-  assert(args.length > 0, `replicator mode not specified`);
+  assert(args.length >= 2, `expected [fileMode, workerIndex, ...flags]`);
   const fileMode = v.parse(args[0], replicaFileModeSchema);
+  const workerIndex = Number(args[1]);
+  const config = getNormalizedZeroConfig({env, argv: args.slice(2)});
+
+  startOtelAuto(
+    createLogContext(config, 'syncer', workerIndex, false),
+    'syncer',
+    workerIndex,
+  );
+  const lc = createLogContext(config, 'syncer', workerIndex);
+  initEventSink(lc, config);
 
   const {cvr, upstream, enableCrudMutations} = config;
 
   const replicaFile = replicaFileName(config.replica.file, fileMode);
   lc.debug?.(`running view-syncer on ${replicaFile}`);
 
-  const cvrDB = pgClient(lc, cvr.db, {
+  const cvrDB = pgClient(lc, cvr.db, `sync-worker-${pid}-cvr`, {
     max: must(cvr.maxConnsPerWorker, 'cvr.maxConnsPerWorker must be set'),
-    connection: {['application_name']: `zero-sync-worker-${pid}-cvr`},
   });
 
   const upstreamDB = enableCrudMutations
-    ? pgClient(lc, upstream.db, {
+    ? pgClient(lc, upstream.db, `sync-worker-${pid}-upstream`, {
         max: must(
           upstream.maxConnsPerWorker,
           'upstream.maxConnsPerWorker must be set',
         ),
-        connection: {['application_name']: `zero-sync-worker-${pid}-upstream`},
       })
     : undefined;
 
@@ -172,7 +174,7 @@ export default function runWorker(
 
     const customQueryTransformer =
       customQueryConfig && new CustomQueryTransformer(logger, shard);
-    const contextManager = new ConnectionContextManagerImpl(
+    const connContextManager = new ConnectionContextManagerImpl(
       logger,
       config.auth.revalidateIntervalSeconds,
       config.auth.retransformIntervalSeconds,
@@ -219,7 +221,7 @@ export default function runWorker(
       drainCoordinator,
       config.log.slowHydrateThreshold,
       inspectorDelegate,
-      contextManager,
+      connContextManager,
       customQueryTransformer,
       runPriorityOp,
     );
@@ -242,12 +244,12 @@ export default function runWorker(
   const pusherFactory =
     pushConfig === undefined
       ? undefined
-      : (id: string, contextManager: ConnectionContextManager) =>
+      : (id: string, connContextManager: ConnectionContextManager) =>
           new PusherService(
             config,
             lc.withContext('clientGroupID', id),
             id,
-            contextManager,
+            connContextManager,
           );
 
   const syncer = new Syncer(

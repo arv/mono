@@ -5,8 +5,9 @@ import type {Read, Store, Write} from './store.ts';
 import {
   maybeTransactionIsClosedRejection,
   throwIfStoreClosed,
-  throwIfTransactionClosed,
+  transactionIsClosedRejection,
 } from './throw-if-closed.ts';
+import {deleteSentinel, WriteImplBase} from './write-impl-base.ts';
 
 /**
  * A SQLite prepared statement.
@@ -172,7 +173,7 @@ export function setupDatabase(
   // Create the entry table
   delegate.execSync(`
     CREATE TABLE IF NOT EXISTS entry (
-      key TEXT PRIMARY KEY, 
+      key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     ) WITHOUT ROWID
   `);
@@ -188,9 +189,12 @@ export function setupDatabase(
       `SELECT key, value FROM entry WHERE key IN (SELECT value FROM json_each(?))`,
     ),
     put: delegate.prepare(
-      'INSERT OR REPLACE INTO entry (key, value) VALUES (?, ?)',
+      `INSERT OR REPLACE INTO entry (key, value)
+   SELECT e.value->>0, e.value->1 FROM json_each(?) e`,
     ),
-    del: delegate.prepare('DELETE FROM entry WHERE key = ?'),
+    del: delegate.prepare(
+      `DELETE FROM entry WHERE key IN (SELECT value FROM json_each(?))`,
+    ),
   };
 }
 
@@ -367,61 +371,82 @@ export class SQLiteStoreRead implements Read {
   }
 }
 
-export class SQLiteWrite implements Write {
+export class SQLiteWrite extends WriteImplBase implements Write {
   readonly #release: () => void;
   readonly #dbDelegate: SQLiteDatabase;
   readonly #preparedStatements: PreparedStatements;
-  readonly #read: SQLiteStoreRead;
   #committed = false;
+  #closed = false;
 
   constructor(
     release: () => void,
     dbDelegate: SQLiteDatabase,
     preparedStatements: PreparedStatements,
   ) {
+    super(new SQLiteStoreRead(() => undefined, preparedStatements));
     this.#release = release;
     this.#dbDelegate = dbDelegate;
     this.#preparedStatements = preparedStatements;
-    this.#read = new SQLiteStoreRead(() => {}, preparedStatements);
   }
 
-  has(key: string): Promise<boolean> {
-    return this.#read.has(key);
-  }
-
-  get(key: string): Promise<ReadonlyJSONValue | undefined> {
-    return this.#read.get(key);
-  }
-
-  async put(key: string, value: ReadonlyJSONValue): Promise<void> {
-    throwIfTransactionClosed(this);
-    await this.#preparedStatements.put.exec([key, JSON.stringify(value)]);
-  }
-
-  async del(key: string): Promise<void> {
-    throwIfTransactionClosed(this);
-    await this.#preparedStatements.del.exec([key]);
-  }
-
-  // oxlint-disable-next-line require-await
   async commit(): Promise<void> {
-    throwIfTransactionClosed(this);
+    if (this.#closed) {
+      return transactionIsClosedRejection();
+    }
+
+    const deleteKeys: string[] = [];
+    for (const entry of this._pending) {
+      if (entry[1] === deleteSentinel) {
+        deleteKeys.push(entry[0]);
+        this._pending.delete(entry[0]);
+      }
+    }
+
+    const delP =
+      deleteKeys.length > 0
+        ? this.#preparedStatements.del.exec([JSON.stringify(deleteKeys)])
+        : undefined;
+    const upP =
+      this._pending.size > 0
+        ? this.#preparedStatements.put.exec([
+            JSON.stringify([...this._pending]),
+          ])
+        : undefined;
+
+    if (delP && upP) {
+      await Promise.all([delP, upP]);
+    } else if (delP) {
+      await delP;
+    } else if (upP) {
+      await upP;
+    }
+
     this.#dbDelegate.execSync('COMMIT');
+    this._pending.clear();
     this.#committed = true;
   }
 
   release(): void {
-    if (!this.closed) {
-      this.#read.release();
+    if (!this.#closed) {
+      this.#closed = true;
+      super.release();
+      let rollbackError: unknown;
       if (!this.#committed) {
-        this.#dbDelegate.execSync('ROLLBACK');
+        try {
+          this.#dbDelegate.execSync('ROLLBACK');
+        } catch (e) {
+          rollbackError = e;
+        }
       }
       this.#release();
+      if (rollbackError !== undefined) {
+        throw rollbackError;
+      }
     }
   }
 
   get closed(): boolean {
-    return this.#read.closed;
+    return this.#closed;
   }
 }
 

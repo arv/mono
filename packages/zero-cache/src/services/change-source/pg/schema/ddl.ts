@@ -3,11 +3,7 @@ import {assert} from '../../../../../../shared/src/asserts.ts';
 import * as v from '../../../../../../shared/src/valita.ts';
 import {upstreamSchema, type ShardConfig} from '../../../../types/shards.ts';
 import {id} from '../../../../types/sql.ts';
-import {
-  indexDefinitionsQuery,
-  publishedSchema,
-  publishedTableQuery,
-} from './published.ts';
+import {publishedSchema, publishedSchemaQuery} from './published.ts';
 
 // Sent in the 'version' tag of "ddlStart" and "ddlUpdate" event messages.
 // This is used to ensure that the message constructed in the upstream
@@ -26,36 +22,58 @@ const triggerEvent = v.object({
 export const ddlEventSchema = triggerEvent.extend({
   version: v.literal(PROTOCOL_VERSION),
   schema: publishedSchema,
+  event: v.object({tag: v.string()}),
 });
 
-// The `ddlStart` message is computed before every DDL event, regardless of
-// whether the subsequent event affects the shard. Downstream processing should
-// capture the contained schema information in order to determine the schema
-// changes necessary to apply a subsequent `ddlUpdate` message. Note that a
-// `ddlUpdate` message may not follow, as updates determined to be irrelevant
-// to the shard will not result in a message. However, all `ddlUpdate` messages
-// are guaranteed to be preceded by a `ddlStart` message.
+/**
+ * A {@link DdlStartEvent} message is emitted before every DDL event, containing
+ * the current `schema` and the command `tag`.
+ *
+ * In most cases, the `DdlStartEvent` itself will not be associated with a
+ * schema change, in which case `previousSchema` will be `null`. However, the
+ * message is still emitted, both for backwards compatibility and to provide
+ * the command `tag` context in case an immediately following `DdlStartEvent`
+ * tag is emitted with a schema change (which can happen when another event
+ * trigger results in a nested ddl statement).
+ *
+ * In such cases, the `previousSchema` and `schema` fields of the latter event
+ * are used to determine the necessary schema change operations (as they are
+ * with `ddlUpdate` and `schemaSnapshot` events), and the `tag` of the
+ * preceding start event indicates the command that precipitated the schema
+ * change (e.g. a CREATE vs ALTER) to determine whether a backfill is
+ * necessary.
+ */
 export const ddlStartEventSchema = ddlEventSchema.extend({
   type: v.literal('ddlStart'),
+  // For ddlStart messages, previousSchema is `null` if there was no change
+  // in schema detected. The `schema` field is always set to the current
+  // schema.
+  //
+  // In 1.5.0 it is always present, and can be made non-optional when
+  // rollback safe.
+  previousSchema: publishedSchema.nullable().optional(),
+  // For backwards compatibility with previous versions of the trigger,
+  // default an absent `event` field with a semantic equivalent. This
+  // field override can be removed in a version that is rollback safe
+  // with 1.4.0.
+  event: v.object({tag: v.string()}).optional(() => ({tag: 'UNKNOWN'})),
 });
 
 export type DdlStartEvent = v.Infer<typeof ddlStartEventSchema>;
 
 /**
- * The {@link DdlUpdateEvent} contains an updated schema resulting from
- * a particular ddl event. The event type provides information
- * (i.e. constraints) on the difference from the schema of the preceding
- * {@link DdlStartEvent}.
- *
- * Note that in almost all cases (the exception being `CREATE` events),
- * it is possible that there is no relevant difference between the
- * ddl-start schema and the ddl-update schema, as many aspects of the
- * schema (e.g. column constraints) are not relevant to downstream
- * replication.
+ * A {@link DdlUpdateEvent} is emitted if there was a change in the schema.
+ * It always contains `previousSchema` and (current) `schema` fields, leaving
+ * it to the receiver to compute the necessary schema change operations.
  */
 export const ddlUpdateEventSchema = ddlEventSchema.extend({
   type: v.literal('ddlUpdate'),
-  event: v.object({tag: v.string()}),
+  // ddlUpdate messages are only emitted if the schema changed, with the
+  // `previousSchema` containing the schema before the change.
+  //
+  // In 1.5.0 it is always set, and can be made non-optional when
+  // rollback safe.
+  previousSchema: publishedSchema.optional(),
 });
 
 export type DdlUpdateEvent = v.Infer<typeof ddlUpdateEventSchema>;
@@ -63,48 +81,28 @@ export type DdlUpdateEvent = v.Infer<typeof ddlUpdateEventSchema>;
 /**
  * The `schemaSnapshot` message is a snapshot of a schema taken in response to
  * a `COMMENT ON PUBLICATION` command, which is a hook recognized by zero
- * to manually emit schema snapshots to support detection of schema changes
- * from `ALTER PUBLICATION` commands on supabase, which does not fire event
- * triggers for them (https://github.com/supabase/supautils/issues/123).
+ * to manually emit `previousSchema` and `schema` snapshots when a difference
+ * is detected. This is a workaround provided to support detection of schema
+ * changes from `ALTER PUBLICATION` commands on supabase, which does not fire
+ * event triggers for them (https://github.com/supabase/supautils/issues/123).
  *
- * The hook is exercised by bookmarking the publication change with
- * `COMMENT ON PUBLICATION` statements within e.g.
+ * The hook is exercised by trailing the publication change with a
+ * `COMMENT ON PUBLICATION` statement, e.g.
  *
  * ```sql
  * BEGIN;
- * COMMENT ON PUBLICATION my_publication IS 'whatever';
  * ALTER PUBLICATION my_publication ...;
  * COMMENT ON PUBLICATION my_publication IS 'whatever';
  * COMMIT;
  * ```
  *
- * The `change-source` will perform the diff between a `schemaSnapshot`
- * events and its preceding `schemaSnapshot` (or `ddlUpdate`) within the
- * transaction.
- *
- * In the case where event trigger support is missing, this results in
- * diffing the `schemaSnapshot`s before and after the `ALTER PUBLICATION`
- * statement, thus effecting the same logic that would have been exercised
- * between the `ddlStart` and `ddlEvent` events fired by a database with
- * fully functional event triggers.
- *
- * Note that if the same transaction is run on a database that *does*
- * support event triggers on `ALTER PUBLICATION` statements, the sequence
- * of emitted messages will be:
- *
- * * `schemaSnapshot`
- * * `ddlStart`
- * * `ddlUpdate`
- * * `schemaSnapshot`
- *
- * Since `schemaSnapshot` messages are diffed with the preceding
- * `schemaSnapshot` or `ddlUpdate` event (if any), there will be no schema
- * difference between the `ddlUpdate` and the second `schemaSnapshot`, and
- * thus the extra `COMMENT` statements will effectively be no-ops.
+ * Note that it is fine to invoke `COMMENT ON PUBLICATION` statements
+ * on a database that *does* support event triggers on
+ * `ALTER PUBLICATION` statements, as it will simply be a no-op.
  */
 export const schemaSnapshotEventSchema = ddlEventSchema.extend({
   type: v.literal('schemaSnapshot'),
-  event: v.object({tag: v.string()}),
+  previousSchema: publishedSchema.optional(),
 });
 
 export type SchemaSnapshotEvent = v.Infer<typeof schemaSnapshotEventSchema>;
@@ -123,6 +121,10 @@ function append(shardNum: number) {
   return (name: string) => id(name + '_' + String(shardNum));
 }
 
+// pg_advisory_xact_lock key for serializing ddl statements in order to
+// produce correct schema change diffs.
+const DDL_SERIALIZATION_LOCK = 0x3c6b8468f1bac0b0n;
+
 /**
  * Event trigger functions contain the core logic that are invoked by triggers.
  *
@@ -140,7 +142,7 @@ function append(shardNum: number) {
  * Instead, we opt for the simplicity and isolation of having each shard
  * completely own (and maintain) the entirety of its trigger/function stack.
  */
-function createEventFunctionStatements(shard: ShardConfig) {
+export function createEventFunctionStatements(shard: ShardConfig) {
   const {appID, shardNum, publications} = shard;
   const schema = id(upstreamSchema(shard)); // e.g. "{APP_ID}_{SHARD_ID}"
   return /*sql*/ `
@@ -151,32 +153,92 @@ RETURNS record AS $$
 DECLARE
   result record;
 BEGIN
-  SELECT current_query() AS "query" into result;
+  SELECT COALESCE(current_query(), 'current_query() returned NULL') AS "query" into result;
   RETURN result;
 END
 $$ LANGUAGE plpgsql;
 
 
-CREATE OR REPLACE FUNCTION ${schema}.notice_ignore(tag TEXT, target record)
+CREATE OR REPLACE FUNCTION ${schema}.notice_ignore(reason TEXT, tag TEXT, target record)
 RETURNS void AS $$
 BEGIN
-  RAISE NOTICE 'zero(%) ignoring % %', ${lit(shardNum)}, tag, row_to_json(target);
+  RAISE NOTICE '${appID}_${shardNum} ignoring % % %', reason, tag, 
+    COALESCE(row_to_json(target)::text, '');
 END
 $$ LANGUAGE plpgsql;
 
 
-CREATE OR REPLACE FUNCTION ${schema}.schema_specs()
-RETURNS TEXT AS $$
+-- Note: DROP and CREATE to upgrade from v20 to v21 because the
+-- return type has changed. This can be simplified to CREATE OR REPLACE
+-- once 1.5.0 is rollback safe.
+DROP FUNCTION IF EXISTS ${schema}.schema_specs();
+CREATE FUNCTION ${schema}.schema_specs()
+RETURNS JSON 
+STABLE
+AS $$
+  ${publishedSchemaQuery(publications)}
+$$ LANGUAGE sql;
+
+
+-- Stores the most recent published schema
+CREATE TABLE IF NOT EXISTS ${schema}."publishedSchema" (
+  current JSON,
+  exists BOOL PRIMARY KEY DEFAULT true CHECK (exists)
+);
+
+INSERT INTO ${schema}."publishedSchema" (current) VALUES (${schema}.schema_specs())
+  ON CONFLICT (exists) DO 
+  UPDATE SET current = excluded.current;
+
+
+CREATE OR REPLACE FUNCTION ${schema}.update_schemas(event_type text, tag text, target record)
+RETURNS void AS $$
 DECLARE
-  tables record;
-  indexes record;
+  prev_schema_specs JSON;
+  schema_specs JSON;
+  message TEXT;
 BEGIN
-  ${publishedTableQuery(publications)} INTO tables;
-  ${indexDefinitionsQuery(publications)} INTO indexes;
-  RETURN json_build_object(
-    'tables', tables.tables,
-    'indexes', indexes.indexes
-  );
+  SELECT current FROM ${schema}."publishedSchema" INTO prev_schema_specs;
+  SELECT ${schema}.schema_specs() INTO schema_specs;
+  
+  IF prev_schema_specs::text != schema_specs::text THEN
+    UPDATE ${schema}."publishedSchema" SET current = schema_specs;
+  ELSIF event_type = 'ddlStart' THEN
+    -- ddlStart events are always be emitted to allow the zero-cache
+    -- to track the context of the current command tag in the face of
+    -- nested event triggers (e.g. start->start->end->end).
+    prev_schema_specs = NULL;
+  ELSIF event_type = 'ddlUpdate' THEN
+    -- TODO: fold 'schemaSnapshot' into this condition too (i.e. make it "ELSE")
+    -- when 1.5.0 is rollback safe. Until then, noop schemaSnapshots are sent
+    -- for compatibility with 1.0.0 ~ 1.4.0.
+    PERFORM ${schema}.notice_ignore('noop', tag, target);
+    RETURN;
+  END IF;
+
+  SELECT json_build_object(
+    'type', event_type,
+    'version', ${PROTOCOL_VERSION},
+    'previousSchema', prev_schema_specs,
+    'schema', schema_specs,
+    'event', json_build_object('tag', tag),
+    'context', ${schema}.get_trigger_context()
+  ) INTO message;
+
+  PERFORM pg_logical_emit_message(true, '${appID}/${shardNum}/ddl', message);
+
+  RAISE NOTICE 'Emitted ${appID}_${shardNum} % for % %', event_type, tag, 
+    COALESCE(row_to_json(target)::text, '');
+END
+$$ LANGUAGE plpgsql;
+
+
+-- Hook/workaround to manually trigger replication of schema changes on DBs 
+-- that do not support/allow event triggers.
+CREATE OR REPLACE FUNCTION ${schema}.update_schemas()
+RETURNS void AS $$
+BEGIN
+  PERFORM ${schema}.update_schemas('schemaSnapshot', 'MANUAL', NULL);
 END
 $$ LANGUAGE plpgsql;
 
@@ -184,36 +246,25 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION ${schema}.emit_ddl_start()
 RETURNS event_trigger AS $$
 DECLARE
-  schema_specs TEXT;
+  schema_specs JSON;
   message TEXT;
 BEGIN
-  SELECT ${schema}.schema_specs() INTO schema_specs;
-
-  SELECT json_build_object(
-    'type', 'ddlStart',
-    'version', ${PROTOCOL_VERSION},
-    'schema', schema_specs::json,
-    'context', ${schema}.get_trigger_context()
-  ) INTO message;
-
-  PERFORM pg_logical_emit_message(true, ${lit(
-    `${appID}/${shardNum}`,
-  )}, message);
+  -- serialize DDL statements to compute correct schema change diffs
+  PERFORM pg_advisory_xact_lock(${DDL_SERIALIZATION_LOCK});
+  PERFORM ${schema}.update_schemas('ddlStart', TG_TAG, NULL);
 END
 $$ LANGUAGE plpgsql;
 
 
-CREATE OR REPLACE FUNCTION ${schema}.emit_ddl_end(tag TEXT)
-RETURNS void AS $$
+CREATE OR REPLACE FUNCTION ${schema}.emit_ddl_end()
+RETURNS event_trigger AS $$
 DECLARE
   publications TEXT[];
   target RECORD;
   relevant RECORD;
-  schema_specs TEXT;
+  schema_specs JSON;
   message TEXT;
   event TEXT;
-  event_type TEXT;
-  event_prefix TEXT;
 BEGIN
   publications := ARRAY[${lit(publications)}];
 
@@ -228,7 +279,7 @@ BEGIN
   --       tables, and there is no way to determine if the table "used to be" in the
   --       set. Thus, all ALTER TABLE statements must produce a ddl update, similar to
   --       any DROP * statement.
-  IF (target.object_type = 'table' AND tag != 'ALTER TABLE') 
+  IF (target.object_type = 'table' AND TG_TAG != 'ALTER TABLE') 
      OR target.object_type = 'table column' THEN
     SELECT ns.nspname AS "schema", c.relname AS "name" FROM pg_class AS c
       JOIN pg_namespace AS ns ON c.relnamespace = ns.oid
@@ -268,46 +319,26 @@ BEGIN
       INTO relevant;
 
   -- no-op CREATE IF NOT EXIST statements
-  ELSIF tag LIKE 'CREATE %' AND target.object_type IS NULL THEN
+  ELSIF TG_TAG LIKE 'CREATE %' AND target.object_type IS NULL THEN
     relevant := NULL;
   END IF;
 
   IF relevant IS NULL THEN
-    PERFORM ${schema}.notice_ignore(tag, target);
+    PERFORM ${schema}.notice_ignore('irrelevant', TG_TAG, target);
     RETURN;
   END IF;
 
-  IF tag = 'COMMENT' THEN
+  IF TG_TAG = 'COMMENT' THEN
     -- Only make schemaSnapshots for COMMENT ON PUBLICATION
     IF target.object_type != 'publication' THEN
-      PERFORM ${schema}.notice_ignore(tag, target);
+      PERFORM ${schema}.notice_ignore('irrelevant', TG_TAG, target);
       RETURN;
     END IF;
-    event_type := 'schemaSnapshot';
-    event_prefix := '/ddl';
+    PERFORM ${schema}.update_schemas('schemaSnapshot', TG_TAG, target);
   ELSE
-    event_type := 'ddlUpdate';
-    event_prefix := '';  -- TODO: Use '/ddl' for both when rollback safe
+    PERFORM ${schema}.update_schemas('ddlUpdate', TG_TAG, target);
   END IF;
 
-  RAISE INFO 'Creating % for % %', event_type, tag, row_to_json(target);
-
-  -- Construct and emit the DdlUpdateEvent message.
-  SELECT json_build_object('tag', tag) INTO event;
-  
-  SELECT ${schema}.schema_specs() INTO schema_specs;
-
-  SELECT json_build_object(
-    'type', event_type,
-    'version', ${PROTOCOL_VERSION},
-    'schema', schema_specs::json,
-    'event', event::json,
-    'context', ${schema}.get_trigger_context()
-  ) INTO message;
-
-  PERFORM pg_logical_emit_message(true, ${lit(
-    `${appID}/${shardNum}`,
-  )} || event_prefix, message);
 END
 $$ LANGUAGE plpgsql;
 `;
@@ -337,33 +368,27 @@ export function createEventTriggerStatements(shard: ShardConfig) {
 
   const triggers = [
     dropEventTriggerStatements(shard.appID, shard.shardNum),
-    createEventFunctionStatements(shard),
-  ];
-
-  // A single ddl_command_start trigger covering all relevant tags.
-  triggers.push(/*sql*/ `
+    /*sql*/ `
 CREATE EVENT TRIGGER ${sharded(`${appID}_ddl_start`)}
   ON ddl_command_start
   WHEN TAG IN (${lit(TAGS)})
   EXECUTE PROCEDURE ${schema}.emit_ddl_start();
-`);
 
-  // A per-tag ddl_command_end trigger that dispatches to ${schema}.emit_ddl_end(tag)
+CREATE EVENT TRIGGER ${sharded(`${appID}_ddl_end`)}
+  ON ddl_command_end
+  WHEN TAG IN (${lit([...TAGS, 'COMMENT'])})
+  EXECUTE PROCEDURE ${schema}.emit_ddl_end();
+`,
+  ];
+
+  // Drop legacy functions / triggers.
+  triggers.push(
+    `DROP FUNCTION IF EXISTS ${schema}.emit_ddl_end(text) CASCADE;`,
+    `DROP FUNCTION IF EXISTS ${schema}.notice_ignore(text, record);`,
+  );
   for (const tag of [...TAGS, 'COMMENT']) {
     const tagID = tag.toLowerCase().replace(' ', '_');
-    triggers.push(/*sql*/ `
-CREATE OR REPLACE FUNCTION ${schema}.emit_${tagID}() 
-RETURNS event_trigger AS $$
-BEGIN
-  PERFORM ${schema}.emit_ddl_end(${lit(tag)});
-END
-$$ LANGUAGE plpgsql;
-
-CREATE EVENT TRIGGER ${sharded(`${appID}_${tagID}`)}
-  ON ddl_command_end
-  WHEN TAG IN (${lit(tag)})
-  EXECUTE PROCEDURE ${schema}.emit_${tagID}();
-`);
+    triggers.push(`DROP FUNCTION IF EXISTS ${schema}.emit_${tagID}() CASCADE;`);
   }
   return triggers.join('');
 }
@@ -373,18 +398,8 @@ export function dropEventTriggerStatements(
   appID: string,
   shardID: string | number,
 ) {
-  const stmts: string[] = [];
-  // A single ddl_command_start trigger covering all relevant tags.
-  stmts.push(/*sql*/ `
+  return /*sql*/ `
     DROP EVENT TRIGGER IF EXISTS ${id(`${appID}_ddl_start_${shardID}`)};
-  `);
-
-  // A per-tag ddl_command_end trigger that dispatches to ${schema}.emit_ddl_end(tag)
-  for (const tag of [...TAGS, 'COMMENT']) {
-    const tagID = tag.toLowerCase().replace(' ', '_');
-    stmts.push(/*sql*/ `
-      DROP EVENT TRIGGER IF EXISTS ${id(`${appID}_${tagID}_${shardID}`)};
-    `);
-  }
-  return stmts.join('');
+    DROP EVENT TRIGGER IF EXISTS ${id(`${appID}_ddl_end_${shardID}`)};
+  `;
 }

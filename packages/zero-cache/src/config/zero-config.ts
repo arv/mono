@@ -195,14 +195,14 @@ const authOptions = {
     ],
   },
   revalidateIntervalSeconds: {
-    type: v.number().optional(),
+    type: v.number().default(300),
     desc: [
       `The interval in seconds between periodic /query auth revalidation for validated connections.`,
       `If unset, periodic auth revalidation is disabled.`,
     ],
   },
   retransformIntervalSeconds: {
-    type: v.number().optional(),
+    type: v.number().default(300),
     desc: [
       `The interval in seconds between periodic shared /query retransform work for a client group.`,
       `If unset, periodic shared retransform is disabled.`,
@@ -497,6 +497,17 @@ export const zeroOptions = {
         `{bold zero-cache} replication subscriptions.`,
       ],
     },
+
+    statementTimeoutMs: {
+      type: v.number().default(20_000),
+      desc: [
+        `Fail change-log transactions if a statement response from postgres is not received within`,
+        `the specified timeout. This differs from a postgres {bold statement_timeout} in that`,
+        `it is implemented to handle a pathological case in which Postgres does not return a`,
+        `response but otherwise believes the transaction to be idle.`,
+      ],
+      hidden: true, // make visible if proven to be effective/necessary
+    },
   },
 
   replica: replicaOptions,
@@ -512,6 +523,27 @@ export const zeroOptions = {
   port: {
     type: v.number().default(4848),
     desc: [`The port for sync connections.`],
+  },
+
+  keepaliveTimeoutMs: {
+    type: v.number().optional(),
+    desc: [
+      `The timeout since the last /keepalive request after which the server will initiate`,
+      `a graceful shutdown. This is a workaround for AWS Elastic Container Service, which`,
+      `otherwise provides no signal that a target has been deregistered (and should thus begin`,
+      `shutdown); the cessation of health checks at /keepalive is instead used as the signal to`,
+      `drain. (ECS later sends a SIGTERM before killing the server but only allows a 30-second`,
+      `timeout before sending SIGKILL).`,
+      ``,
+      `Other container runners explicitly send a SIGTERM followed by a configurable drain interval,`,
+      `in which case /keepalive logic is not necessary.`,
+      ``,
+      `When running the server in ECS, this timeout should be set to some multiple of the health`,
+      `check interval. If the option is unset, the keepalive timeout is disabled in non-ECS environments,`,
+      `and defaults to 20 seconds when run in ECS (determined by the presence of the`,
+      `{bold ECS_CONTAINER_METADATA_URI_V4} environment variable as per`,
+      `https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-environment-variables.html).`,
+    ],
   },
 
   changeStreamer: {
@@ -799,6 +831,15 @@ export const zeroOptions = {
       ],
     },
 
+    region: {
+      type: v.string().optional(),
+      desc: [
+        `The AWS region for the litestream backup bucket. Required for non-standard AWS partitions`,
+        `(e.g. GovCloud {bold us-gov-west-1}) where Litestream cannot auto-detect the region.`,
+        `The {bold replication-manager} and {bold view-syncers} must have the same region.`,
+      ],
+    },
+
     port: {
       type: v.number().optional(),
       desc: [
@@ -916,9 +957,50 @@ export const zeroOptions = {
     textCopy: {
       type: v.boolean().default(false),
       desc: [
-        `Use text-format COPY instead of binary COPY for the initial sync.`,
-        `This is slower but can work around issues with binary encoding of`,
-        `certain data types.`,
+        `Use text-format COPY instead of binary COPY for initial sync and`,
+        `backfill streaming. This is slower but can work around issues with`,
+        `binary encoding of certain data types.`,
+      ],
+    },
+  },
+
+  shadowSync: {
+    enabled: {
+      type: v.boolean().default(false),
+      desc: [
+        `Periodically exercises the initial-sync code path against a sample of`,
+        `rows from every published table, writing to a throwaway SQLite database.`,
+        `This acts as a canary: if the real initial-sync path ever breaks (schema`,
+        `drift, PG version quirks, etc.), the shadow run fails before a customer`,
+        `actually needs a full reset.`,
+      ],
+    },
+
+    intervalHours: {
+      type: v.number().default(12),
+      desc: [
+        `The interval between shadow initial-sync runs, in hours. The first`,
+        `run fires within [2/3, 1) of this interval after startup, so the`,
+        `canary completes at least once per task lifetime (the replication`,
+        `manager is restarted every ~24h) while still jittering so a fleet`,
+        `restart does not cause all tasks to canary simultaneously.`,
+      ],
+    },
+
+    sampleRate: {
+      type: v.number().default(0.1),
+      desc: [
+        `The BERNOULLI sampling rate for each table (0 < rate <= 1). A value of`,
+        `1 disables sampling and copies all rows (still subject to`,
+        `{bold max-rows-per-table}).`,
+      ],
+    },
+
+    maxRowsPerTable: {
+      type: v.number().default(10000),
+      desc: [
+        `The hard upper bound on rows copied per table per shadow run. Guards`,
+        `against unexpectedly large tables consuming disk / upstream bandwidth.`,
       ],
     },
   },

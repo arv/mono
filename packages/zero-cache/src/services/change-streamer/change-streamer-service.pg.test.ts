@@ -5,7 +5,7 @@ import postgres from 'postgres';
 import {beforeEach, describe, expect, vi, type Mock} from 'vitest';
 import {AbortError} from '../../../../shared/src/abort-error.ts';
 import {assert} from '../../../../shared/src/asserts.ts';
-import {stringify} from '../../../../shared/src/bigint-json.ts';
+import {BigIntJSON, stringify} from '../../../../shared/src/bigint-json.ts';
 import {createSilentLogContext} from '../../../../shared/src/logging-test-utils.ts';
 import {Queue} from '../../../../shared/src/queue.ts';
 import {sleep} from '../../../../shared/src/sleep.ts';
@@ -25,7 +25,10 @@ import {
   type SubscriptionState,
 } from '../replicator/schema/replication-state.ts';
 import {ReplicationMessages} from '../replicator/test-utils.ts';
-import {initializeStreamer} from './change-streamer-service.ts';
+import {
+  initializeStreamer,
+  type TuningOptions,
+} from './change-streamer-service.ts';
 import {
   PROTOCOL_VERSION,
   type ChangeStreamerService,
@@ -34,6 +37,12 @@ import {
 import * as ErrorType from './error-type-enum.ts';
 import {AutoResetSignal, ensureReplicationConfig} from './schema/tables.ts';
 import {PurgeLocker} from './storer.ts';
+
+const opts: TuningOptions = {
+  backPressureLimitHeapProportion: 0.04,
+  flowControlConsensusPaddingSeconds: 1,
+  statementTimeoutMs: 20_000,
+};
 
 describe('change-streamer/service', () => {
   let lc: LogContext;
@@ -87,8 +96,7 @@ describe('change-streamer/service', () => {
       replicaConfig,
       null,
       true,
-      0.04,
-      1,
+      opts,
       setTimeoutFn as unknown as typeof setTimeout,
     );
     streamerDone = streamer.run();
@@ -99,11 +107,11 @@ describe('change-streamer/service', () => {
     };
   });
 
-  function drainToQueue(sub: Source<Downstream>): Queue<Downstream> {
+  function drainToQueue(sub: Source<string>): Queue<Downstream> {
     const queue = new Queue<Downstream>();
     void (async () => {
       for await (const msg of sub) {
-        queue.enqueue(msg);
+        queue.enqueue(BigIntJSON.parse(msg) as Downstream);
       }
     })();
     return queue;
@@ -860,7 +868,8 @@ describe('change-streamer/service', () => {
     expect(setTimeoutFn).toHaveBeenCalledTimes(3);
 
     drainToQueue(sub1);
-    for await (const msg of sub2) {
+    for await (const json of sub2) {
+      const msg: Downstream = BigIntJSON.parse(json) as Downstream;
       if (msg[0] === 'commit' && msg[2].watermark === '08') {
         // Now that sub2 has consumed past '06',
         // a purge should successfully clear records before '06'
@@ -959,8 +968,7 @@ describe('change-streamer/service', () => {
       replicaConfig,
       null,
       true,
-      0.04,
-      1,
+      opts,
     );
     void streamer.run();
 
@@ -989,8 +997,7 @@ describe('change-streamer/service', () => {
       replicaConfig,
       null,
       true,
-      0.04,
-      1,
+      opts,
     );
     void streamer.run();
 
@@ -1014,8 +1021,7 @@ describe('change-streamer/service', () => {
       replicaConfig,
       null,
       true,
-      0.04,
-      1,
+      opts,
     );
     void streamer.run();
 
@@ -1053,8 +1059,7 @@ describe('change-streamer/service', () => {
       replicaConfig,
       lock,
       true,
-      0.04,
-      1,
+      opts,
     );
     void streamer.run();
 
@@ -1097,8 +1102,7 @@ describe('change-streamer/service', () => {
       replicaConfig,
       null,
       true,
-      0.04,
-      1,
+      opts,
     );
     void streamer.run();
 
@@ -1140,8 +1144,7 @@ describe('change-streamer/service', () => {
       replicaConfig,
       null,
       true,
-      0.04,
-      1,
+      opts,
     );
     void streamer.run();
 
@@ -1200,8 +1203,7 @@ describe('change-streamer/service', () => {
       replicaConfig,
       null,
       true,
-      0.04,
-      1,
+      opts,
     );
     void streamer.run();
 
@@ -1277,8 +1279,7 @@ describe('change-streamer/service', () => {
       replicaConfig,
       null,
       true,
-      0.04,
-      1,
+      opts,
     );
     void streamer.run();
 

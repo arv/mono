@@ -141,7 +141,7 @@ export class ProcessManager {
     // fails. This is not really an error when the server is shutting down,
     // so log any post-close errors at 'warn'.
     proc.on('error', err =>
-      this.#lc[isOpen ? 'error' : 'warn']?.(
+      this.#lc[!isOpen || this.#drainStart > 0 ? 'warn' : 'error']?.(
         `error from ${name} ${proc.pid}`,
         err,
       ),
@@ -315,8 +315,6 @@ export async function exitAfter(run: () => Promise<void>) {
   }
 }
 
-const DEFAULT_STOP_INTERVAL_MS = 20_000;
-
 /**
  * The HeartbeatMonitor monitors the cadence heartbeats (e.g. "/keepalive"
  * health checks made to HttpServices) that signal that the server
@@ -336,7 +334,7 @@ export class HeartbeatMonitor {
   #checkImmediateTimer: NodeJS.Immediate | undefined;
   #lastHeartbeat = 0;
 
-  constructor(lc: LogContext, stopInterval = DEFAULT_STOP_INTERVAL_MS) {
+  constructor(lc: LogContext, stopInterval: number) {
     this.#lc = lc;
     this.#stopInterval = stopInterval;
   }

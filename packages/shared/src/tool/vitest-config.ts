@@ -24,7 +24,7 @@ assertValidBrowser(VITEST_BROWSER);
 
 const define = {
   ...makeDefine(),
-  ['TESTING']: 'true',
+  'import.meta.env.VITEST': 'true',
 };
 
 const logSilenceMessages = [
@@ -90,6 +90,9 @@ export const benchConfig = defineConfig({
     'process.env.BENCH_OUTPUT_FORMAT': JSON.stringify(
       process.env.BENCH_OUTPUT_FORMAT ?? '',
     ),
+    'process.env.BENCH_SUMMARY': JSON.stringify(
+      process.env.BENCH_SUMMARY ?? '',
+    ),
   },
 
   test: {
@@ -111,6 +114,12 @@ export const benchConfig = defineConfig({
     slowTestThreshold: 15_000,
     testTimeout: 60_000,
     hookTimeout: 60_000,
+    // Run bench files sequentially to avoid memory contention between workers.
+    maxWorkers: 1,
+  },
+
+  optimizeDeps: {
+    exclude: ['@mitata/counters'],
   },
 
   server: {

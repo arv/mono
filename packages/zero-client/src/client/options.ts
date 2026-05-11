@@ -1,4 +1,4 @@
-import type {LogLevel} from '@rocicorp/logger';
+import type {LogLevel, LogSink} from '@rocicorp/logger';
 import type {StoreProvider} from '../../../replicache/src/kv/store.ts';
 import * as v from '../../../shared/src/valita.ts';
 import type {
@@ -87,6 +87,19 @@ export type ZeroOptions<
    * Default is `'error'`.
    */
   logLevel?: LogLevel | undefined;
+
+  /**
+   * Destination for Zero's log output. When omitted, logs are written with
+   * `console.log`/`info`/`warn`/`error` etc.
+   *
+   * Provide a custom {@linkcode LogSink} to redirect logs — for example, to
+   * `process.stderr` in a CLI so that the tool's structured stdout output
+   * isn't polluted by log lines.
+   *
+   * Note: this overrides only the console sink. When analytics logging is
+   * enabled, the Datadog sink is still installed alongside this one.
+   */
+  logSink?: LogSink | undefined;
 
   /**
    * This defines the schema of the tables used in Zero and their relationships
@@ -222,16 +235,24 @@ export type ZeroOptions<
 
   /**
    * `onClientStateNotFound` is called when this client is no longer able
-   * to sync with the zero-cache due to missing synchronization state.  This
+   * to sync with zero-cache due to missing synchronization state. This
    * can be because:
    * - the local persistent synchronization state has been garbage collected.
    *   This can happen if the client has no pending mutations and has not been
    *   used for a while (e.g. the client's tab has been hidden for a long time).
-   * - the zero-cache fails to find the server side synchronization state for
+   * - zero-cache fails to find the server side synchronization state for
    *   this client.
+   * - zero-cache rejects this client's persisted synchronization state,
+   *   requiring the local Replicache database to be reset.
    *
-   * The default behavior is to reload the page (using `location.reload()`).
-   * Provide your own function to prevent the page from reloading automatically.
+   * The current `Zero` instance should be treated as dead and replaced, not
+   * reconnected.
+   *
+   * The default behavior for the Zero client is to reload the page
+   * (using `location.reload()`). The React and SolidJS providers will replace
+   * the client in-place, without a full page reload.
+   *
+   * Provide your own function to prevent this functionality.
    */
   onClientStateNotFound?: (() => void) | undefined;
 

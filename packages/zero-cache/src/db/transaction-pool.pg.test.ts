@@ -11,10 +11,12 @@ import type {PostgresDB} from '../types/pg.ts';
 import * as Mode from './mode-enum.ts';
 import {
   importSnapshot,
+  ResponseTimeoutError,
   sharedSnapshot,
   synchronizedSnapshots,
   TIMEOUT_TASKS,
   TransactionPool,
+  type Options,
   type Task,
 } from './transaction-pool.ts';
 
@@ -53,15 +55,17 @@ describe('db/transaction-pool', () => {
     maxWorkers = initialWorkers,
     timeoutTasks = TIMEOUT_TASKS, // Overridden for tests.
   ) {
-    const pool = new TransactionPool(
-      lc,
-      mode,
-      init,
-      cleanup,
-      initialWorkers,
-      maxWorkers,
+    return newTransactionPoolWithOpts(
+      {mode, init, cleanup, initialWorkers, maxWorkers},
       timeoutTasks,
     );
+  }
+
+  function newTransactionPoolWithOpts(
+    opts: Options,
+    timeoutTasks = TIMEOUT_TASKS,
+  ) {
+    const pool = new TransactionPool(lc, opts, timeoutTasks);
     pools.push(pool);
     return pool;
   }
@@ -110,40 +114,37 @@ describe('db/transaction-pool', () => {
     });
   });
 
-  test('ref counting', async () => {
-    const single = newTransactionPool(
-      Mode.SERIALIZABLE,
-      initTask,
-      cleanupTask,
-      1,
-      1,
-    );
+  test('response timeout', async () => {
+    await db`INSERT INTO foo (id) VALUES (1)`;
 
-    expect(single.isRunning()).toBe(false);
-    single.run(db);
-    expect(single.isRunning()).toBe(true);
+    // To induce a response timeout, we hold a lock in one tx and wait
+    // for another tx to timeout.
+    const lockHolder = newTransactionPool(Mode.READ_COMMITTED).run(db);
+    void lockHolder.process(task(`SELECT * FROM foo FOR UPDATE`));
 
-    // 1 -> 2 -> 3
-    single.ref();
-    expect(single.isRunning()).toBe(true);
-    single.ref();
-    expect(single.isRunning()).toBe(true);
+    const lockWaiter = newTransactionPoolWithOpts({
+      mode: Mode.READ_COMMITTED,
+      statementResponseTimeout: 50,
+    }).run(db);
 
-    // 3 -> 2 -> 1
-    single.unref();
-    expect(single.isRunning()).toBe(true);
-    single.unref();
-    expect(single.isRunning()).toBe(true);
+    const promise = lockWaiter.process(task(`DELETE FROM foo`));
+    lockWaiter.setDone();
 
-    // 1 -> 0
-    single.unref();
-    expect(single.isRunning()).toBe(false);
+    // Note: The promise returned by process never throws, but it should
+    //       resolve once the response timeout aborts the transaction.
+    await promise;
 
-    await single.done();
+    // Release the lock to allow the transaction to proceed.
+    lockHolder.setDone();
 
+    // The final transaction should abort with the ResponseTimeoutError.
+    await expect(lockWaiter.done()).rejects.toThrow(ResponseTimeoutError);
+
+    await lockHolder.done();
+
+    // The delete should not have succeeded.
     await expectTables(db, {
-      ['public.workers']: [{id: 1}],
-      ['public.cleaned']: [{id: 1}],
+      ['public.foo']: [{id: 1, val: null}],
     });
   });
 
@@ -449,7 +450,6 @@ describe('db/transaction-pool', () => {
     void pool.process(task(`INSERT INTO foo (id) VALUES (2)`));
     void pool.process(task(`INSERT INTO foo (id, val) VALUES (8, 'foo')`));
     void pool.process(task(`INSERT INTO foo (id) VALUES (5)`));
-    pool.setDone();
 
     // Set the failure before running.
     pool.fail(new Error('oh nose'));

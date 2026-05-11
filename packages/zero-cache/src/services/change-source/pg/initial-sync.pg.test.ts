@@ -1,6 +1,13 @@
+import {mkdtemp, readdir, rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {LogContext} from '@rocicorp/logger';
 import {nanoid} from 'nanoid/non-secure';
 import {beforeEach, describe, expect} from 'vitest';
-import {createSilentLogContext} from '../../../../../shared/src/logging-test-utils.ts';
+import {
+  createSilentLogContext,
+  TestLogSink,
+} from '../../../../../shared/src/logging-test-utils.ts';
 import type {ZeroEvent} from '../../../../../zero-events/src/index.ts';
 import {Database} from '../../../../../zqlite/src/db.ts';
 import {listIndexes, listTables} from '../../../db/lite-tables.ts';
@@ -18,12 +25,22 @@ import {
   initDB as initLiteDB,
 } from '../../../test/lite.ts';
 import {PG_17} from '../../../types/pg-versions.ts';
-import type {PostgresDB} from '../../../types/pg.ts';
+import {type PostgresDB} from '../../../types/pg.ts';
 import {ZERO_VERSION_COLUMN_NAME} from '../../replicator/schema/replication-state.ts';
-import {initialSync, INSERT_BATCH_SIZE} from './initial-sync.ts';
+import {
+  getInitialDownloadState,
+  initialSync,
+  INSERT_BATCH_SIZE,
+  shadowInitialSync,
+  verifyShadowReplica,
+} from './initial-sync.ts';
 import {fromStateVersionString} from './lsn.ts';
 import {ensureShardSchema} from './schema/init.ts';
 import {getPublicationInfo} from './schema/published.ts';
+import {
+  getInternalShardConfig,
+  replicationSlotExpression,
+} from './schema/shard.ts';
 import {UnsupportedTableSchemaError} from './schema/validation.ts';
 
 const APP_ID = '1';
@@ -2626,7 +2643,7 @@ describe('change-source/pg/initial-sync', {timeout: 10000}, () => {
           .map(([_, spec]) => spec);
         for (const r of replicas) {
           expect(r).toMatchObject({
-            slot: expect.stringMatching(`${APP_ID}_${SHARD_NUM}_\\d+`),
+            slot: expect.stringMatching(`${APP_ID}_${SHARD_NUM}_[a-z]`),
             // Importantly, the initialSchema column is populated during initial sync.
             initialSchema: {
               tables: tableSpecs,
@@ -2749,6 +2766,12 @@ describe('change-source/pg/initial-sync', {timeout: 10000}, () => {
       result = e;
     }
     expect(result).toBeInstanceOf(UnsupportedTableSchemaError);
+
+    // Regression: real-path initial-sync must clean up its orphaned slot.
+    const leftoverSlots = await upstream<{slotName: string}[]>`
+      SELECT slot_name as "slotName" FROM pg_replication_slots
+       WHERE slot_name LIKE ${replicationSlotExpression(shardConfig)}`;
+    expect(leftoverSlots).toEqual([]);
   });
 
   test.each([
@@ -2869,5 +2892,378 @@ describe('change-source/pg/initial-sync', {timeout: 10000}, () => {
     expect(String(result)).toEqual(
       'Error: The App ID may only consist of lower-case letters, numbers, and the underscore character',
     );
+  });
+
+  describe('shadow initial sync', () => {
+    const SHADOW_SHARD = {
+      appID: APP_ID,
+      shardNum: SHARD_NUM,
+      publications: [],
+    } as const;
+    const SLOT_LIKE = replicationSlotExpression(SHADOW_SHARD);
+
+    async function seedWithManyRows(upstream: PostgresDB, rows: number) {
+      await upstream`CREATE TABLE big(id int4 PRIMARY KEY, val text)`;
+      await upstream`
+        INSERT INTO big (id, val)
+          SELECT g, 'row-' || g FROM generate_series(1, ${rows}) g`;
+      await ensureShardSchema(createSilentLogContext(), upstream, SHADOW_SHARD);
+    }
+
+    async function countSlots(upstream: PostgresDB): Promise<number> {
+      const [{count}] = await upstream<{count: number}[]>`
+        SELECT COUNT(*)::int as count FROM pg_replication_slots
+         WHERE slot_name LIKE ${SLOT_LIKE}`;
+      return count;
+    }
+
+    async function countReplicas(upstream: PostgresDB): Promise<number> {
+      const schema = `${APP_ID}_${SHARD_NUM}`;
+      const [{count}] = await upstream<{count: number}[]>`
+        SELECT COUNT(*)::int as count FROM ${upstream(schema)}."replicas"`;
+      return count;
+    }
+
+    test('does not create a replication slot, add a replicas row, or publish events', async () => {
+      const lc = createSilentLogContext();
+      await seedWithManyRows(upstream, 200);
+
+      const slotsBefore = await countSlots(upstream);
+      const replicasBefore = await countReplicas(upstream);
+      expect(slotsBefore).toBe(0);
+      expect(replicasBefore).toBe(0);
+
+      const eventSink: ZeroEvent[] = [];
+      initEventSinkForTesting(eventSink);
+
+      const replica = new Database(lc, ':memory:');
+      await initialSync(
+        lc,
+        SHADOW_SHARD,
+        replica,
+        getConnectionURI(upstream),
+        {tableCopyWorkers: 2, shadow: {sampleRate: 0.5, maxRowsPerTable: 20}},
+        TEST_CONTEXT,
+      );
+
+      expect(await countSlots(upstream)).toBe(0);
+      expect(await countReplicas(upstream)).toBe(0);
+      expect(eventSink).toEqual([]);
+
+      // And no walsender connections should have been opened against this
+      // test's database. Scoped by datname so concurrent tests in other DBs
+      // on the same cluster (which may legitimately open walsenders as part
+      // of real initial-sync flows) don't contaminate the check.
+      const walsenders = await upstream<{count: number}[]>`
+        SELECT COUNT(*)::int as count FROM pg_stat_activity
+         WHERE backend_type = 'walsender' AND datname = current_database()`;
+      expect(walsenders[0].count).toBe(0);
+    });
+
+    test('caps rows per table via sampleRate + maxRowsPerTable', async () => {
+      const lc = createSilentLogContext();
+      await seedWithManyRows(upstream, 500);
+
+      const replica = new Database(lc, ':memory:');
+      await initialSync(
+        lc,
+        SHADOW_SHARD,
+        replica,
+        getConnectionURI(upstream),
+        {tableCopyWorkers: 2, shadow: {sampleRate: 0.2, maxRowsPerTable: 25}},
+        TEST_CONTEXT,
+      );
+
+      const [{count}] = replica
+        .prepare('SELECT COUNT(*) as count FROM big')
+        .all<{count: number}>();
+      expect(count).toBeLessThanOrEqual(25);
+      expect(count).toBeLessThan(500);
+    });
+
+    test('shadow failure does not drop or touch existing replication slots', async () => {
+      const lc = createSilentLogContext();
+
+      // First establish a real shard + slot via a normal initial sync.
+      await upstream`CREATE TABLE foo(id int4 PRIMARY KEY)`;
+      await upstream`INSERT INTO foo(id) VALUES (1)`;
+      const real = new Database(lc, ':memory:');
+      await initialSync(
+        lc,
+        SHADOW_SHARD,
+        real,
+        getConnectionURI(upstream),
+        {tableCopyWorkers: 1},
+        TEST_CONTEXT,
+      );
+      expect(await countSlots(upstream)).toBe(1);
+      expect(await countReplicas(upstream)).toBe(1);
+
+      // Force a shadow failure mid-sync by adding an invalid table to the
+      // publication after shard setup.
+      await upstream`CREATE TABLE "has/inval!d/ch@aracter$"(id int4)`;
+
+      const replica = new Database(lc, ':memory:');
+      let err: unknown;
+      try {
+        await initialSync(
+          lc,
+          SHADOW_SHARD,
+          replica,
+          getConnectionURI(upstream),
+          {tableCopyWorkers: 1, shadow: {sampleRate: 1, maxRowsPerTable: 100}},
+          TEST_CONTEXT,
+        );
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(UnsupportedTableSchemaError);
+
+      // The pre-existing slot and replica row must be untouched.
+      expect(await countSlots(upstream)).toBe(1);
+      expect(await countReplicas(upstream)).toBe(1);
+    });
+
+    test('shadowInitialSync uses a single table-copy worker', async () => {
+      await seedWithManyRows(upstream, 20);
+      // Publish an extra table so numTables > 1 — otherwise
+      // `Math.min(tableCopyWorkers, numTables)` would clamp to 1 regardless.
+      await upstream`CREATE TABLE extra(id int4 PRIMARY KEY)`;
+      await upstream`INSERT INTO extra(id) VALUES (1)`;
+
+      const sink = new TestLogSink();
+      const lc = new LogContext('info', undefined, sink);
+
+      await shadowInitialSync(
+        lc,
+        SHADOW_SHARD,
+        getConnectionURI(upstream),
+        {sampleRate: 1, maxRowsPerTable: 5},
+        TEST_CONTEXT,
+      );
+
+      const workersLog = sink.messages.find(([, , args]) =>
+        args.some(
+          a =>
+            typeof a === 'string' &&
+            a.startsWith('Started ') &&
+            a.includes(' workers to copy '),
+        ),
+      );
+      expect(workersLog?.[2][0]).toMatch(
+        /^Started 1 workers to copy [2-9]\d* tables$/,
+      );
+    });
+
+    test('shadowInitialSync wrapper cleans up tempfile dir', async () => {
+      const lc = createSilentLogContext();
+      await seedWithManyRows(upstream, 50);
+
+      // Isolate this test's scratch dir via parentDir so concurrent test
+      // configs (pg-15 / pg-16 / pg-17 / pg-18 run in parallel under one
+      // vitest invocation and all share the real OS tmpdir) can't race on
+      // `zero-shadow-sync-*` entries created by each other's runs.
+      const testTmp = await mkdtemp(join(tmpdir(), 'shadow-cleanup-test-'));
+      try {
+        await shadowInitialSync(
+          lc,
+          SHADOW_SHARD,
+          getConnectionURI(upstream),
+          {sampleRate: 0.5, maxRowsPerTable: 10, parentDir: testTmp},
+          TEST_CONTEXT,
+        );
+
+        // Nothing the wrapper created should remain.
+        expect(await readdir(testTmp)).toEqual([]);
+        // And it still left no upstream footprint.
+        expect(await countSlots(upstream)).toBe(0);
+        expect(await countReplicas(upstream)).toBe(0);
+      } finally {
+        await rm(testTmp, {recursive: true, force: true});
+      }
+    });
+
+    describe('verifyShadowReplica', () => {
+      async function runShadowSync() {
+        await seedWithManyRows(upstream, 20);
+        const lc = createSilentLogContext();
+        const replica = new Database(lc, ':memory:');
+        await initialSync(
+          lc,
+          SHADOW_SHARD,
+          replica,
+          getConnectionURI(upstream),
+          {tableCopyWorkers: 1, shadow: {sampleRate: 1, maxRowsPerTable: 100}},
+          TEST_CONTEXT,
+        );
+        const {publications} = await getInternalShardConfig(
+          upstream,
+          SHADOW_SHARD,
+        );
+        const publishedInfo = await getPublicationInfo(upstream, publications);
+        const [{count}] = replica
+          .prepare('SELECT COUNT(*) as count FROM big')
+          .all<{count: number}>();
+        return {lc, replica, publishedInfo, bigCount: count};
+      }
+
+      test('passes on a valid replica', async () => {
+        const {lc, replica, publishedInfo, bigCount} = await runShadowSync();
+        const rowsByTable = new Map([['big', bigCount]]);
+        expect(() =>
+          verifyShadowReplica(lc, replica, publishedInfo, rowsByTable),
+        ).not.toThrow();
+      });
+
+      test('throws when a published table is missing from the replica', async () => {
+        const {lc, replica, publishedInfo} = await runShadowSync();
+        replica.exec('DROP TABLE big');
+        expect(() =>
+          verifyShadowReplica(lc, replica, publishedInfo, new Map()),
+        ).toThrow(/missing table in replica: big/);
+      });
+
+      test('throws on row-count mismatch', async () => {
+        const {lc, replica, publishedInfo} = await runShadowSync();
+        const rowsByTable = new Map([['big', 999_999]]);
+        expect(() =>
+          verifyShadowReplica(lc, replica, publishedInfo, rowsByTable),
+        ).toThrow(
+          /row count mismatch for table big: copy counter reported 999999/,
+        );
+      });
+
+      test('throws on missing column_metadata row', async () => {
+        const {lc, replica, publishedInfo} = await runShadowSync();
+        replica.exec(
+          `DELETE FROM "_zero.column_metadata"
+             WHERE table_name = 'big' AND column_name = 'val'`,
+        );
+        expect(() =>
+          verifyShadowReplica(lc, replica, publishedInfo, new Map()),
+        ).toThrow(/missing column_metadata row for big\.val/);
+      });
+
+      test('throws when a table is unqueryable via ZQL', async () => {
+        const {lc, replica, publishedInfo} = await runShadowSync();
+        // Dropping the only unique index over non-null columns makes
+        // computeZqlSpecs silently exclude the table.
+        const idx = replica
+          .prepare(
+            `SELECT name FROM sqlite_master
+              WHERE type = 'index' AND tbl_name = 'big' AND name NOT LIKE 'sqlite_%'`,
+          )
+          .all<{name: string}>();
+        for (const {name} of idx) {
+          replica.exec(`DROP INDEX "${name}"`);
+        }
+        expect(() =>
+          verifyShadowReplica(lc, replica, publishedInfo, new Map()),
+        ).toThrow(/dropped by computeZqlSpecs.*big/s);
+      });
+    });
+  });
+
+  describe('getInitialDownloadState', () => {
+    let upstream: PostgresDB;
+
+    beforeEach<PgTest>(async ({testDBs}) => {
+      upstream = await testDBs.create('download_state_test');
+      return () => testDBs.drop(upstream);
+    });
+
+    test('returns estimates from pg_class for a populated table', async () => {
+      await upstream.unsafe(/*sql*/ `
+        CREATE TABLE estimate_test (
+          id INTEGER PRIMARY KEY,
+          name TEXT,
+          data TEXT
+        );
+        INSERT INTO estimate_test (id, name, data)
+          SELECT i, 'name_' || i, repeat('x', 100)
+          FROM generate_series(1, 1000) AS i;
+        ANALYZE estimate_test;
+      `);
+
+      const lc = createSilentLogContext();
+      const spec: PublishedTableSpec = {
+        schema: 'public',
+        name: 'estimate_test',
+        columns: {
+          id: {dataType: 'int4', pos: 1},
+          name: {dataType: 'text', pos: 2},
+          data: {dataType: 'text', pos: 3},
+        },
+        publications: {pub1: {rowFilter: null}},
+      } as unknown as PublishedTableSpec;
+
+      const state = await getInitialDownloadState(lc, upstream, spec, false);
+
+      expect(state.spec).toBe(spec);
+      expect(state.status.table).toBe('estimate_test');
+      expect(state.status.columns).toEqual(['id', 'name', 'data']);
+      expect(state.status.rows).toBe(0); // rows starts at 0, incremented during copy
+      // After ANALYZE, reltuples should be exactly 1000.
+      expect(state.status.totalRows).toBe(1000);
+      // 1000 rows × ~150 bytes each (100-byte data + id + name + overhead).
+      // pg_relation_size returns the on-disk file size, expect 100KB-500KB.
+      expect(state.status.totalBytes).toBeGreaterThan(100_000);
+      expect(state.status.totalBytes).toBeLessThan(500_000);
+    });
+
+    test('returns zeros for a never-analyzed empty table', async () => {
+      await upstream.unsafe(/*sql*/ `
+        CREATE TABLE empty_test (
+          id INTEGER PRIMARY KEY
+        );
+      `);
+
+      const lc = createSilentLogContext();
+      const spec: PublishedTableSpec = {
+        schema: 'public',
+        name: 'empty_test',
+        columns: {
+          id: {dataType: 'int4', pos: 1},
+        },
+        publications: {pub1: {rowFilter: null}},
+      } as unknown as PublishedTableSpec;
+
+      const state = await getInitialDownloadState(lc, upstream, spec, false);
+
+      expect(state.status.totalRows).toBe(0);
+      expect(state.status.totalBytes).toBe(0);
+    });
+
+    test('handles non-public schema tables', async () => {
+      await upstream.unsafe(/*sql*/ `
+        CREATE SCHEMA test_schema;
+        CREATE TABLE test_schema.my_table (
+          id INTEGER PRIMARY KEY,
+          val TEXT
+        );
+        INSERT INTO test_schema.my_table (id, val)
+          SELECT i, 'val_' || i FROM generate_series(1, 100) AS i;
+        ANALYZE test_schema.my_table;
+      `);
+
+      const lc = createSilentLogContext();
+      const spec: PublishedTableSpec = {
+        schema: 'test_schema',
+        name: 'my_table',
+        columns: {
+          id: {dataType: 'int4', pos: 1},
+          val: {dataType: 'text', pos: 2},
+        },
+        publications: {pub1: {rowFilter: null}},
+      } as unknown as PublishedTableSpec;
+
+      const state = await getInitialDownloadState(lc, upstream, spec, false);
+
+      expect(state.status.totalRows).toBe(100);
+      // 100 rows × ~40 bytes each (id + val + overhead).
+      // Expect at least one 8KB page and no more than 64KB.
+      expect(state.status.totalBytes).toBeGreaterThanOrEqual(8192);
+      expect(state.status.totalBytes).toBeLessThan(65_536);
+    });
   });
 });
