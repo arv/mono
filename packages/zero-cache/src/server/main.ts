@@ -33,6 +33,7 @@ import {
   MUTATOR_URL,
   REAPER_URL,
   REPLICATOR_URL,
+  SHADOW_SYNCER_URL,
   SYNCER_URL,
 } from './worker-urls.ts';
 
@@ -45,8 +46,12 @@ export default async function runWorker(
   const startMs = Date.now();
   const config = getNormalizedZeroConfig({env});
 
-  startOtelAuto(createLogContext(config, {worker: 'dispatcher'}, false));
-  const lc = createLogContext(config, {worker: 'dispatcher'}, true);
+  startOtelAuto(
+    createLogContext(config, 'dispatcher', 0, false),
+    'dispatcher',
+    0,
+  );
+  const lc = createLogContext(config, 'dispatcher');
   initEventSink(lc, config);
 
   const processes = new ProcessManager(lc, parent);
@@ -145,6 +150,15 @@ export default async function runWorker(
     await reaperReady;
   }
 
+  // Only run the shadow-sync canary on the replication-manager (or in
+  // single-node mode, where it also owns upstream). Running on every
+  // view-syncer would hammer the upstream with N redundant canaries.
+  if (config.shadowSync.enabled && runChangeStreamer) {
+    const {promise: shadowReady, resolve: shadowStarted} = resolver();
+    loadWorker(SHADOW_SYNCER_URL, 'supporting').once('message', shadowStarted);
+    await shadowReady;
+  }
+
   const syncers: Worker[] = [];
   if (numSyncers) {
     const mode: ReplicaFileMode =
@@ -163,7 +177,7 @@ export default async function runWorker(
 
     const notifier = createNotifierFrom(lc, replicator);
     for (let i = 0; i < numSyncers; i++) {
-      syncers.push(loadWorker(SYNCER_URL, 'user-facing', i + 1, mode));
+      syncers.push(loadWorker(SYNCER_URL, 'user-facing', i, mode, String(i)));
     }
     syncers.forEach(syncer => handleSubscriptionsFrom(lc, syncer, notifier));
   }

@@ -808,3 +808,96 @@ describe('Cap limit 0', () => {
     },
   );
 });
+
+describe('Cap wiring regression', () => {
+  test('non-flipped EXISTS child with flipped OR branch keeps sorted input for UnionFanIn', () => {
+    const sources: Sources = {
+      issue: {
+        columns: {id: {type: 'string'}},
+        primaryKeys: ['id'],
+      },
+      comment: {
+        columns: {
+          id: {type: 'string'},
+          issueID: {type: 'string'},
+          ownerID: {type: 'string'},
+          text: {type: 'string'},
+        },
+        primaryKeys: ['id'],
+      },
+      user: {
+        columns: {
+          id: {type: 'string'},
+          role: {type: 'string'},
+        },
+        primaryKeys: ['id'],
+      },
+    };
+
+    const ast: AST = {
+      table: 'issue',
+      orderBy: [['id', 'asc']],
+      where: {
+        type: 'correlatedSubquery',
+        related: {
+          system: 'client',
+          correlation: {parentField: ['id'], childField: ['issueID']},
+          subquery: {
+            table: 'comment',
+            alias: 'comments',
+            orderBy: [['id', 'asc']],
+            where: {
+              type: 'or',
+              conditions: [
+                {
+                  type: 'simple',
+                  left: {type: 'column', name: 'text'},
+                  op: '=',
+                  right: {type: 'literal', value: 'public'},
+                },
+                {
+                  type: 'correlatedSubquery',
+                  op: 'EXISTS',
+                  flip: true,
+                  related: {
+                    system: 'client',
+                    correlation: {
+                      parentField: ['ownerID'],
+                      childField: ['id'],
+                    },
+                    subquery: {
+                      table: 'user',
+                      alias: 'owner',
+                      orderBy: [['id', 'asc']],
+                      where: {
+                        type: 'simple',
+                        left: {type: 'column', name: 'role'},
+                        op: '=',
+                        right: {type: 'literal', value: 'teacher'},
+                      },
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+        op: 'EXISTS',
+      },
+    } as const;
+
+    expect(() =>
+      runPushTest({
+        sources,
+        sourceContents: {
+          issue: [{id: 'i1'}],
+          comment: [{id: 'c1', issueID: 'i1', ownerID: 'u1', text: 'private'}],
+          user: [{id: 'u1', role: 'teacher'}],
+        },
+        ast,
+        format: {singular: false, relationships: {}},
+        pushes: [],
+      }),
+    ).not.toThrow();
+  });
+});

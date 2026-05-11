@@ -55,6 +55,8 @@ jobs:
           node-version: 24.x
       - uses: bencherdev/bencher@main
 
+      - uses: ./.github/actions/setup-docker
+
       - run: npm ci
 
       - name: Run benchmarks
@@ -68,7 +70,6 @@ jobs:
           cat output.json |\
           bencher run \
           --project zero \
-          --ci-number ${{ github.run_number }} \
           --testbed self-hosted-metal \
           --token '${{ secrets.BENCHER_API_TOKEN }}' \
           --adapter json \

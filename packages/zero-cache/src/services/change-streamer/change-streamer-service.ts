@@ -21,6 +21,7 @@ import type {
 import {
   type ChangeStreamControl,
   type ChangeStreamData,
+  type Rollback,
 } from '../change-source/protocol/current/downstream.ts';
 import {
   publishReplicationError,
@@ -35,7 +36,6 @@ import {
 } from '../running-state.ts';
 import {
   type ChangeStreamerService,
-  type Downstream,
   type Status,
   type SubscriberContext,
 } from './change-streamer.ts';
@@ -47,8 +47,16 @@ import {
   ensureReplicationConfig,
   markResetRequired,
 } from './schema/tables.ts';
-import {Storer, type PurgeLock} from './storer.ts';
+import {
+  Storer,
+  type PurgeLock,
+  type TuningOptions as StorerOptions,
+} from './storer.ts';
 import {Subscriber} from './subscriber.ts';
+
+export type TuningOptions = StorerOptions & {
+  flowControlConsensusPaddingSeconds: number;
+};
 
 /**
  * Performs initialization and schema migrations to initialize a ChangeStreamerImpl.
@@ -65,8 +73,7 @@ export async function initializeStreamer(
   subscriptionState: SubscriptionState,
   purgeLock: PurgeLock | null,
   autoReset: boolean,
-  backPressureLimitHeapProportion: number,
-  flowControlConsensusPaddingSeconds: number,
+  opts: TuningOptions,
   setTimeoutFn = setTimeout,
 ): Promise<ChangeStreamerService> {
   // Make sure the ChangeLog DB is set up.
@@ -93,13 +100,14 @@ export async function initializeStreamer(
     replicationStatusPublisher,
     purgeLock,
     autoReset,
-    backPressureLimitHeapProportion,
-    flowControlConsensusPaddingSeconds,
+    opts,
     setTimeoutFn,
   );
 }
 
 const REPLICATION_STATUS_ERROR_DELAY_THRESHOLD_MS = 5000;
+
+export type ChangeTag = ChangeStreamData[1]['tag'];
 
 /**
  * Internally all Downstream messages (not just commits) are given a watermark.
@@ -110,8 +118,16 @@ const REPLICATION_STATUS_ERROR_DELAY_THRESHOLD_MS = 5000;
  * However, only the watermark for `Commit` messages are exposed to
  * subscribers, as that is the only semantically correct watermark to
  * use for tracking a position in a replication stream.
+ *
+ * Additionally, the ChangeStreamData is eagerly stringified once, after which
+ * the string is passed to the changeLog and all subscribers, eliminating
+ * redundant stringification and reducing GC churn.
  */
-export type WatermarkedChange = [watermark: string, ChangeStreamData];
+export type WatermarkedChange = [
+  watermark: string,
+  tag: ChangeTag,
+  json: string,
+];
 
 /**
  * Upstream-agnostic dispatch of messages in a {@link ChangeStreamMessage} to a
@@ -303,8 +319,7 @@ class ChangeStreamerImpl implements ChangeStreamerService {
     replicationStatusPublisher: ReplicationStatusPublisher,
     initialPurgeLock: PurgeLock | null,
     autoReset: boolean,
-    backPressureLimitHeapProportion: number,
-    flowControlConsensusPaddingSeconds: number,
+    opts: TuningOptions,
     setTimeoutFn = setTimeout,
   ) {
     this.id = `change-streamer`;
@@ -323,10 +338,11 @@ class ChangeStreamerImpl implements ChangeStreamerService {
       replicaVersion,
       consumed => this.#stream?.acks.push(['status', consumed[1], consumed[2]]),
       err => this.stop(err),
-      backPressureLimitHeapProportion,
+      opts,
     );
     this.#forwarder = new Forwarder(lc, {
-      flowControlConsensusPaddingSeconds,
+      flowControlConsensusPaddingSeconds:
+        opts.flowControlConsensusPaddingSeconds,
     });
     this.#replicationStatusPublisher = replicationStatusPublisher;
     this.#purgeLock = initialPurgeLock;
@@ -424,8 +440,9 @@ class ChangeStreamerImpl implements ChangeStreamerService {
               break;
           }
 
-          const entry: WatermarkedChange = [watermark, change];
-          unflushedBytes += this.#storer.store(entry);
+          const json = this.#storer.store(watermark, change);
+          const entry: WatermarkedChange = [watermark, change[1].tag, json];
+          unflushedBytes += json.length;
           if (unflushedBytes < flushBytesThreshold) {
             // pipeline changes until flushBytesThreshold
             this.#forwarder.forward(entry);
@@ -462,7 +479,7 @@ class ChangeStreamerImpl implements ChangeStreamerService {
       if (watermark) {
         this.#lc.warn?.(`aborting interrupted transaction ${watermark}`);
         this.#storer.abort();
-        this.#forwarder.forward([watermark, ['rollback', {tag: 'rollback'}]]);
+        this.#forwarder.forward([watermark, 'rollback', ROLLBACK_JSON]);
       }
 
       // Backoff and drain any pending entries in the storer before reconnecting.
@@ -505,12 +522,12 @@ class ChangeStreamerImpl implements ChangeStreamerService {
     }
   }
 
-  subscribe(ctx: SubscriberContext): Promise<Source<Downstream>> {
+  subscribe(ctx: SubscriberContext): Promise<Source<string>> {
     const {protocolVersion, id, mode, replicaVersion, watermark} = ctx;
     if (mode === 'serving') {
       this.#serving.resolve();
     }
-    const downstream = Subscription.create<Downstream>({
+    const downstream = Subscription.create<string>({
       cleanup: () => this.#forwarder.remove(subscriber),
     });
     const subscriber = new Subscriber(
@@ -633,3 +650,8 @@ class ChangeStreamerImpl implements ChangeStreamerService {
 // so that the `change-streamer` can track its progress and know when it has
 // surpassed the initial watermark of the backup [1].
 const CLEANUP_DELAY_MS = DEFAULT_MAX_RETRY_DELAY_MS * 3;
+
+const ROLLBACK_JSON = JSON.stringify([
+  'rollback',
+  {tag: 'rollback'},
+] satisfies Rollback);

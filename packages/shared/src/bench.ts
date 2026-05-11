@@ -7,6 +7,7 @@ import * as vitest from 'vitest';
 import {
   printBenchHeader,
   printBenchResult,
+  printSummary,
   type Stats,
 } from './bench-format.ts';
 
@@ -18,6 +19,7 @@ export {do_not_optimize as use} from 'mitata';
 declare const process: {env: Record<string, string | undefined>};
 
 const benchOutputFormat = process.env.BENCH_OUTPUT_FORMAT;
+const benchSummary = !!process.env.BENCH_SUMMARY;
 const colors = !process.env.NO_COLOR && !process.env.NODE_DISABLE_COLORS;
 
 type MeasureFn = Parameters<typeof measure>[0];
@@ -25,7 +27,6 @@ type MeasureFn = Parameters<typeof measure>[0];
 const defaultMeasureOptions: MeasureOptions = {
   min_cpu_time: 2e9, // 2 seconds
   min_samples: 50,
-  gc: true,
 };
 
 type BenchResult = {name: string; stats: Stats};
@@ -119,7 +120,12 @@ function wrapTest(testFn: (...args: any[]) => any): TestAPI {
   return wrapped;
 }
 
-export const bench = wrapTest(vitest.test);
+export const bench = wrapTest(vitest.test) as unknown as ((
+  name: string,
+  fn: MeasureFn,
+  opts?: MeasureOptions,
+) => void) &
+  TestAPI;
 
 function wrapSuite(suiteFn: (...args: any[]) => any): typeof vitest.describe {
   const wrapped = ((...args: any[]) => {
@@ -141,6 +147,9 @@ function wrapSuite(suiteFn: (...args: any[]) => any): typeof vitest.describe {
           printJsonResults(results);
         } else {
           printResults(results);
+          if (benchSummary) {
+            printSummary(name, results, colors);
+          }
         }
       });
 

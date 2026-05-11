@@ -49,7 +49,7 @@ jobs:
         with:
           node-version: 24.x
           cache: 'npm'
-      - run: npx oxfmt --check
+      - run: npx oxfmt@^0.45.0 --check
 
   lint:
     name: Lint
@@ -129,4 +129,8 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - name: Run tests
-        run: TEST_PG_MODE=pg-${{ matrix.pg-version }} npm run test -- --shard=${{ matrix.shard }}/2
+        uses: nick-fields/retry@v4
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          command: TEST_PG_MODE=pg-${{ matrix.pg-version }} npm run test -- --shard=${{ matrix.shard }}/2

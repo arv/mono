@@ -1,17 +1,15 @@
 import {execSync} from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
+import {stdin as input, stdout as output} from 'node:process';
+import {createInterface} from 'node:readline/promises';
 import * as path from 'path';
 import commandLineArgs from 'command-line-args';
-import {
-  MIN_SERVER_SUPPORTED_SYNC_PROTOCOL,
-  PROTOCOL_VERSION,
-} from '../../zero-protocol/src/protocol-version.ts';
 
 void main();
 
 async function main() {
-  const {mode, from, remote, allowLocalChanges, dockerOnly} = parseArgs();
+  const {mode, from, remote, allowLocalChanges, dockerOnly, yes} = parseArgs();
 
   try {
     // Find the git root directory
@@ -49,17 +47,6 @@ async function main() {
         'retry mode requires <from> to be an existing release tag (e.g. zero/v0.24.0-canary.3)',
       );
     }
-
-    // For stable releases, we need to know the base version early
-    // Read it from the current working directory before we chdir
-    const zeroPackageJsonPath = path.join(
-      gitRoot,
-      'packages',
-      'zero',
-      'package.json',
-    );
-    const packageData = getPackageData(zeroPackageJsonPath);
-    const currentVersion = packageData.version;
 
     // Check that the ref we're building from exists both locally and remotely
     // and that they point to the same commit
@@ -129,11 +116,15 @@ async function main() {
       execute(`git checkout ${from}`);
     }
 
+    const zeroPackageJsonPath = basePath('packages', 'zero', 'package.json');
+    const packageData = getPackageData(zeroPackageJsonPath);
+    const currentVersion = packageData.version;
+
     let result: Release;
     if (mode === 'canary') {
-      result = await releaseCanary(currentVersion, remote, from);
+      result = await releaseCanary(currentVersion, remote, from, yes);
     } else if (mode === 'stable') {
-      result = await releaseStable(currentVersion, remote, from);
+      result = await releaseStable(currentVersion, remote, from, yes);
     } else {
       if (mode !== 'retry') {
         throw new Error(`Unexpected release mode: ${mode}`);
@@ -143,6 +134,7 @@ async function main() {
         from,
         fromReleaseVersion,
         dockerOnly,
+        yes,
       );
     }
 
@@ -221,6 +213,11 @@ function parseArgs() {
       description: 'Retry mode only: skip npm and publish only docker',
     },
     {
+      name: 'yes',
+      type: Boolean,
+      description: 'Skip interactive confirmation prompt',
+    },
+    {
       name: 'positionals',
       type: String,
       defaultOption: true,
@@ -277,6 +274,7 @@ function parseArgs() {
     remote: options.remote || 'origin',
     allowLocalChanges: Boolean(options['allow-local-changes']),
     dockerOnly,
+    yes: Boolean(options.yes),
   };
 }
 
@@ -297,6 +295,7 @@ Options:
   --remote <name>            Git remote to use (default: origin)
   --allow-local-changes      Allow running with local changes in working directory
   --docker-only              Retry mode only: skip npm and publish only docker
+  --yes                      Skip interactive confirmation prompt
 `);
 
   console.log(`
@@ -332,6 +331,7 @@ async function releaseCanary(
   currentVersion: string,
   remote: string,
   from: string,
+  yes: boolean,
 ): Promise<Release> {
   const version = bumpCanaryVersion(currentVersion, remote);
   const tagName = `zero/v${version}`;
@@ -341,6 +341,7 @@ async function releaseCanary(
     currentVersion,
     version,
   );
+  await confirmRelease(yes);
 
   build(version);
   execute(`git commit -am "Bump version to ${version}"`);
@@ -365,6 +366,7 @@ async function releaseStable(
   currentVersion: string,
   remote: string,
   from: string,
+  yes: boolean,
 ): Promise<Release> {
   const tagName = `zero/v${currentVersion}`;
 
@@ -373,6 +375,7 @@ async function releaseStable(
     currentVersion,
     currentVersion,
   );
+  await confirmRelease(yes);
 
   build(currentVersion);
 
@@ -397,6 +400,7 @@ async function retryRelease(
   from: string,
   fromReleaseVersion: string | undefined,
   dockerOnly: boolean,
+  yes: boolean,
 ): Promise<Release> {
   if (fromReleaseVersion === undefined) {
     throw new Error(
@@ -413,6 +417,7 @@ async function retryRelease(
     fromReleaseVersion,
     {skipGit: true, skipNPM: dockerOnly},
   );
+  await confirmRelease(yes);
 
   if (dockerOnly) {
     console.log('Skipping npm publish (--docker-only)');
@@ -497,7 +502,10 @@ function logReleaseHeader(
   summary: string,
   currentVersion: string,
   nextVersion: string,
-  options?: {skipGit?: boolean | undefined; skipNPM?: boolean | undefined},
+  options?: {
+    skipGit?: boolean | undefined;
+    skipNPM?: boolean | undefined;
+  },
 ) {
   console.log('');
   console.log('='.repeat(60));
@@ -512,6 +520,32 @@ function logReleaseHeader(
   }
   console.log('='.repeat(60));
   console.log('');
+}
+
+async function confirmRelease(yes: boolean) {
+  if (yes) {
+    console.log('Skipping confirmation prompt (--yes)');
+    return;
+  }
+
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error(
+      'Interactive confirmation required but no TTY is available. Re-run with --yes to skip confirmation.',
+    );
+  }
+
+  const rl = createInterface({input, output});
+  try {
+    const answer = (await rl.question('Proceed with release? [y/N] '))
+      .trim()
+      .toLowerCase();
+
+    if (answer !== 'y' && answer !== 'yes') {
+      throw new Error('Release cancelled by user.');
+    }
+  } finally {
+    rl.close();
+  }
 }
 
 function build(version: string) {
@@ -591,8 +625,6 @@ async function pushDocker(version: string) {
         `docker buildx build \\
     --platform linux/amd64,linux/arm64 \\
     --build-arg=ZERO_VERSION=${version} \\
-    --build-arg=ZERO_SYNC_PROTOCOL_VERSION=${PROTOCOL_VERSION} \\
-    --build-arg=ZERO_MIN_SUPPORTED_SYNC_PROTOCOL_VERSION=${MIN_SERVER_SUPPORTED_SYNC_PROTOCOL} \\
     -t rocicorp/zero:${version} \\
     --push .`,
         {cwd: basePath('packages', 'zero')},
