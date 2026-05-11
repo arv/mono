@@ -130,6 +130,8 @@ export function safeFilename(name: string): string {
 export type PreparedStatements = {
   has: PreparedStatement;
   get: PreparedStatement;
+  hasMany: PreparedStatement;
+  getMany: PreparedStatement;
   put: PreparedStatement;
   del: PreparedStatement;
 };
@@ -169,10 +171,12 @@ export function setupDatabase(
 
   // Prepare common statements
   return {
-    has: delegate.prepare(
+    has: delegate.prepare(`SELECT 1 FROM entry WHERE key = ? LIMIT 1`),
+    get: delegate.prepare('SELECT value FROM entry WHERE key = ?'),
+    hasMany: delegate.prepare(
       `SELECT key FROM entry WHERE key IN (SELECT value FROM json_each(?))`,
     ),
-    get: delegate.prepare(
+    getMany: delegate.prepare(
       `SELECT key, value FROM entry WHERE key IN (SELECT value FROM json_each(?))`,
     ),
     put: delegate.prepare(
@@ -186,6 +190,45 @@ export function setupDatabase(
 const CB_STRIDE = 2;
 const CB_RESOLVE = 0;
 const CB_REJECT = 1;
+
+async function flushSingleGet(
+  key: string,
+  callbacks: unknown[],
+  stmt: PreparedStatement,
+): Promise<void> {
+  let rows: unknown[][];
+  try {
+    rows = await stmt.all([key]);
+  } catch (e) {
+    (callbacks[CB_REJECT] as (e: unknown) => void)(e);
+    return;
+  }
+  const raw = rows[0]?.[0] as string | undefined;
+  try {
+    (callbacks[CB_RESOLVE] as (v: ReadonlyJSONValue | undefined) => void)(
+      raw === undefined
+        ? undefined
+        : deepFreeze(JSON.parse(raw) as ReadonlyJSONValue),
+    );
+  } catch (e) {
+    (callbacks[CB_REJECT] as (e: unknown) => void)(e);
+  }
+}
+
+async function flushSingleHas(
+  key: string,
+  callbacks: unknown[],
+  stmt: PreparedStatement,
+): Promise<void> {
+  let rows: unknown[][];
+  try {
+    rows = await stmt.all([key]);
+  } catch (e) {
+    (callbacks[CB_REJECT] as (e: unknown) => void)(e);
+    return;
+  }
+  (callbacks[CB_RESOLVE] as (v: boolean) => void)(rows.length > 0);
+}
 
 async function flushBatch(
   keys: string[],
@@ -214,9 +257,11 @@ function settleGets(
   for (let i = 0; i < keys.length; i++) {
     const raw = resultMap.get(keys[i]);
     try {
-      (callbacks[i * CB_STRIDE + CB_RESOLVE] as (
-        v: ReadonlyJSONValue | undefined,
-      ) => void)(
+      (
+        callbacks[i * CB_STRIDE + CB_RESOLVE] as (
+          v: ReadonlyJSONValue | undefined,
+        ) => void
+      )(
         raw === undefined
           ? undefined
           : deepFreeze(JSON.parse(raw) as ReadonlyJSONValue),
@@ -283,15 +328,21 @@ export class SQLiteStoreRead implements Read {
       this.#scheduled = true;
       queueMicrotask(() => {
         this.#scheduled = false;
-        const {get, has} = this.#preparedStatements;
+        const {get, has, getMany, hasMany} = this.#preparedStatements;
         const getKeys = this.#pendingGetKeys.splice(0);
         const getCallbacks = this.#pendingGetCallbacks.splice(0);
         const hasKeys = this.#pendingHasKeys.splice(0);
         const hasCallbacks = this.#pendingHasCallbacks.splice(0);
-        if (getKeys.length > 0)
-          void flushBatch(getKeys, getCallbacks, get, settleGets);
-        if (hasKeys.length > 0)
-          void flushBatch(hasKeys, hasCallbacks, has, settleHas);
+        if (getKeys.length === 1) {
+          void flushSingleGet(getKeys[0], getCallbacks, get);
+        } else if (getKeys.length > 1) {
+          void flushBatch(getKeys, getCallbacks, getMany, settleGets);
+        }
+        if (hasKeys.length === 1) {
+          void flushSingleHas(hasKeys[0], hasCallbacks, has);
+        } else if (hasKeys.length > 1) {
+          void flushBatch(hasKeys, hasCallbacks, hasMany, settleHas);
+        }
       });
     }
   }
