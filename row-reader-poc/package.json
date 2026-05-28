@@ -6,8 +6,9 @@
   "description": "Binary row serialization (Rust/WASM) vs JSON benchmark POC for Zero IVM.",
   "packageManager": "pnpm@11.3.0",
   "scripts": {
-    "build:wasm:node": "wasm-pack build crates/row-wasm --release --target nodejs --out-dir ../../pkg-node",
-    "build:wasm:web": "wasm-pack build crates/row-wasm --release --target web --out-dir ../../pkg-web",
+    "build:wasm:cargo": "cargo build --release --target wasm32-unknown-unknown -p row-wasm",
+    "build:wasm:node": "pnpm run build:wasm:cargo && wasm-bindgen target/wasm32-unknown-unknown/release/row_wasm.wasm --out-dir pkg-node --target nodejs && echo '{\"type\":\"commonjs\"}' > pkg-node/package.json",
+    "build:wasm:web": "pnpm run build:wasm:cargo && wasm-bindgen target/wasm32-unknown-unknown/release/row_wasm.wasm --out-dir pkg-web --target web",
     "build:wasm": "pnpm run build:wasm:node && pnpm run build:wasm:web",
     "verify": "node js/verify.ts",
     "bench": "node js/bench.ts",

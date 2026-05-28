@@ -46,7 +46,8 @@ TypeScript `CompiledSchema` compute byte-identical offsets.
 ## Prerequisites
 
 - Rust + `wasm32-unknown-unknown` target (`rustup target add wasm32-unknown-unknown`)
-- `wasm-pack`
+- `wasm-bindgen-cli`, version matching the `wasm-bindgen` crate (currently
+  0.2.122): `cargo install wasm-bindgen-cli --version 0.2.122`
 - Node.js >= 22 (runs the `.ts` files directly via native type stripping — no transpile step)
 - pnpm 11.3 (via `corepack`; pinned by the `packageManager` field)
 
@@ -65,7 +66,8 @@ cargo test -p row-core     # serializer unit tests
 pnpm run dev               # vite -> open the browser worker smoke test
 ```
 
-`build:wasm` produces two outputs because `wasm-pack` targets differ: `pkg-node`
+`build:wasm` compiles the crate to wasm once (`cargo build --target
+wasm32-unknown-unknown`), then runs `wasm-bindgen` for each JS target: `pkg-node`
 (`--target nodejs`, used by `bench.ts`/`verify.ts`, no init needed) and
 `pkg-web` (`--target web`, used by the worker, requires `await init()`). Both
 are git-ignored — regenerate with `pnpm run build:wasm`.
@@ -133,9 +135,17 @@ plan): `JSON.stringify` can't encode `BigInt`, and this sidesteps wasm-bindgen's
 2. **Criterion bench location.** Cargo requires benches to live inside a crate,
    so `rust_bench.rs` is `crates/row-core/benches/serialize.rs` rather than a
    top-level `benches/`.
-3. **Two wasm-pack outputs** (`pkg-node` + `pkg-web`) instead of one `pkg`,
-   because the Node bench and the browser worker need different targets.
-4. **`wasm-opt` disabled** (`crates/row-wasm/Cargo.toml`) because the build
-   environment couldn't fetch the binaryen binary. The wasm is still LLVM-
-   optimized via the release profile (`opt-level = "s"`, `lto`). Re-enable for
+3. **`wasm-bindgen` directly, not `wasm-pack`.** wasm-pack is in maintenance
+   mode; it only wraps `cargo build --target wasm32-unknown-unknown` + the
+   `wasm-bindgen` CLI + `wasm-opt`. The build scripts call those directly, so
+   the only wasm tool needed is `wasm-bindgen-cli` (pinned to the crate's
+   `wasm-bindgen` version). The `nodejs` target emits CommonJS, so the node
+   build writes a `{"type":"commonjs"}` `package.json` into `pkg-node/` (the
+   project is otherwise ESM); wasm-pack used to generate this for us.
+4. **Two binding outputs** (`pkg-node` + `pkg-web`) instead of one, because the
+   Node bench and the browser worker need different `wasm-bindgen` targets
+   (`nodejs` vs `web`).
+5. **No `wasm-opt` pass.** The optional binaryen optimization step is skipped;
+   the wasm is still LLVM-optimized via the release profile (`opt-level = "s"`,
+   `lto`). Run `wasm-opt` on the `pkg-*/*_bg.wasm` files for
    production-representative size/perf numbers.
