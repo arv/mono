@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Row Reader POC — multi-worker (browser)</title>
+  </head>
+  <body>
+    <h1>Row Reader POC — multi-worker</h1>
+    <p>
+      N Web Workers each serialize rows in wasm and transfer them to the main
+      thread, which decodes and verifies every row.
+    </p>
+    <pre id="out">starting…</pre>
+    <script type="module" src="./js/threads/browser.main.ts"></script>
+  </body>
+</html>

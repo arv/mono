@@ -24,11 +24,14 @@ row-reader-poc/
     verify.ts          # Node round-trip correctness check
     bench.ts           # mitata benchmark (binary reads vs JSON.parse)
     worker.ts/main.ts  # browser worker smoke test (postMessage transfer)
-    threads/           # multi-thread producers -> main, via a shared ring buffer
-      queue.ts         #   lock-free SPSC rings over one SharedArrayBuffer
-      worker.ts        #   producer: serialize rows, push into its ring
-      main.ts          #   consumer: drain all rings, decode + verify
-  index.html
+    threads/           # multi-thread producers -> main thread
+      queue.ts         #   Node: lock-free SPSC rings over one SharedArrayBuffer
+      worker.ts        #   Node producer (worker_threads): serialize -> ring
+      main.ts          #   Node consumer: drain all rings, decode + verify
+      browser.worker.ts #  browser producer: serialize -> transfer to main
+      browser.main.ts  #   browser consumer: decode + verify
+  index.html           # single-worker browser smoke test
+  threads.html         # multi-worker browser demo
 ```
 
 ## Wire format
@@ -128,24 +131,24 @@ plan): `JSON.stringify` can't encode `BigInt`, and this sidesteps wasm-bindgen's
 `RowReader` returns `int64` as a JS `BigInt` (`DataView.getBigInt64`).
 `bytes` columns cross as arrays of `u8`.
 
-## Multi-threaded production (`pnpm run threads`)
+## Multi-threaded production
 
-`js/threads/` spins up N producer threads that each serialize rows with their
-own wasm instance and push them to the main thread, which decodes every row
-with `RowReader`.
+N producer threads each serialize rows with their own wasm instance and push
+them to the main thread, which decodes every row with `RowReader`. Each row
+encodes its producer (`user_id`, `name = tN#i`) so the consumer can verify
+provenance, that `metadata` round-trips, and that every thread delivered
+exactly its quota. Both variants run single-threaded wasm instances per worker
+— the wasm _linear memory_ is not shared; only the hand-off channel differs.
 
-- **Threads:** Node `worker_threads` (each worker runs its own single-threaded
-  wasm serializer — the wasm linear memory is _not_ shared).
-- **Hand-off:** one `SharedArrayBuffer` holding N lock-free **SPSC ring
-  buffers** (`queue.ts`), one per producer, drained by the single consumer.
-  Synchronization is pure `Atomics` (sequentially consistent in JS, so a
-  producer's slot writes before its `Atomics.store(head)` are visible once the
-  consumer observes the advanced head). The ring is bounded, so a full ring
-  blocks the producer (`Atomics.wait`) until the consumer frees a slot and
-  `Atomics.notify`s it — real backpressure.
-- **Verification:** each row encodes its producer (`user_id`, `name = tN#i`);
-  the consumer asserts provenance + that `metadata` round-trips, and that every
-  thread delivered exactly `ROWS` rows.
+### Node (`pnpm run threads`)
+
+Threads are Node `worker_threads`. Hand-off is one `SharedArrayBuffer` holding N
+lock-free **SPSC ring buffers** (`queue.ts`), one per producer, drained by the
+single consumer. Synchronization is pure `Atomics` (sequentially consistent in
+JS, so a producer's slot writes before its `Atomics.store(head)` are visible
+once the consumer observes the advanced head). The ring is bounded, so a full
+ring blocks the producer (`Atomics.wait`) until the consumer frees a slot and
+`Atomics.notify`s it — real backpressure.
 
 Tunable via env: `THREADS` (default 4), `ROWS` per thread (5000), `CAPACITY`
 ring slots (256). Example: `THREADS=8 ROWS=3000 CAPACITY=16 pnpm run threads`.
@@ -157,11 +160,24 @@ consumed 20000 rows in ~296ms from 4 threads:
 threads: OK — every thread delivered 5000 rows (~67k rows/s)
 ```
 
-This is worker-thread parallelism with a shared-memory queue, _not_ shared wasm
-linear memory. True shared-linear-memory wasm threads (one wasm module across
-all threads, e.g. via `wasm-bindgen-rayon`) compile here too — the blocker is
-the per-thread stack/TLS bootstrap glue, which is clean in a cross-origin-
-isolated browser but fiddly to verify headlessly in Node.
+### Browser (`pnpm run dev` → open `/threads.html`)
+
+Threads are Web Workers, each running the `--target web` wasm. Hand-off is
+`postMessage` with **transferable `ArrayBuffer`s** (zero-copy ownership move),
+batched to amortize message overhead — no `SharedArrayBuffer`, so no
+cross-origin-isolation (COOP/COEP) requirement. Verified here via `tsc` and a
+production `vite build` (which bundles both workers + the wasm asset); the
+decode/transfer logic is the same as the Node path, which is runtime-verified.
+Not yet executed in a real browser in this container.
+
+A `SharedArrayBuffer` ring-buffer variant (like Node's) is also possible in the
+browser but needs COOP/COEP headers, and the main thread can't `Atomics.wait`
+(would use `Atomics.waitAsync` or polling).
+
+True shared-_linear-memory_ wasm threads (one wasm module across all threads,
+e.g. via `wasm-bindgen-rayon`) compile here too; the blocker is the per-thread
+stack/TLS bootstrap glue, clean in a cross-origin-isolated browser but fiddly to
+verify headlessly.
 
 ## Deviations from the original plan
 
