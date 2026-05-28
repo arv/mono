@@ -1,0 +1,5 @@
+# esbuild (a vite dependency, used only by `pnpm run dev`) ships a postinstall
+# build step that pnpm blocks by default. Allow it so `pnpm install` completes
+# cleanly.
+allowBuilds:
+  esbuild: true

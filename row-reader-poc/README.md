@@ -47,27 +47,28 @@ TypeScript `CompiledSchema` compute byte-identical offsets.
 
 - Rust + `wasm32-unknown-unknown` target (`rustup target add wasm32-unknown-unknown`)
 - `wasm-pack`
-- Node.js >= 22
+- Node.js >= 22 (runs the `.ts` files directly via native type stripping — no transpile step)
+- pnpm 11.3 (via `corepack`; pinned by the `packageManager` field)
 
 ## Build & run
 
 ```bash
 # from row-reader-poc/
-npm install
-npm run build:wasm        # builds pkg-node (bench/verify) + pkg-web (browser)
+pnpm install
+pnpm run build:wasm        # builds pkg-node (bench/verify) + pkg-web (browser)
 
-npm run verify            # Rust->WASM->JS round-trip correctness check
-npm run bench             # JS read vs JSON.parse + WASM serialize throughput
-npm run bench:rust        # pure-Rust criterion: binary serialize vs serde_json
-cargo test -p row-core    # serializer unit tests
+pnpm run verify            # Rust->WASM->JS round-trip correctness check
+pnpm run bench             # JS read vs JSON.parse + WASM serialize throughput
+pnpm run bench:rust        # pure-Rust criterion: binary serialize vs serde_json
+cargo test -p row-core     # serializer unit tests
 
-npm run dev               # vite -> open the browser worker smoke test
+pnpm run dev               # vite -> open the browser worker smoke test
 ```
 
 `build:wasm` produces two outputs because `wasm-pack` targets differ: `pkg-node`
 (`--target nodejs`, used by `bench.ts`/`verify.ts`, no init needed) and
 `pkg-web` (`--target web`, used by the worker, requires `await init()`). Both
-are git-ignored — regenerate with `npm run build:wasm`.
+are git-ignored — regenerate with `pnpm run build:wasm`.
 
 ## Sample results
 

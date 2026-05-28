@@ -4,12 +4,13 @@
   "version": "0.0.0",
   "type": "module",
   "description": "Binary row serialization (Rust/WASM) vs JSON benchmark POC for Zero IVM.",
+  "packageManager": "pnpm@11.3.0",
   "scripts": {
     "build:wasm:node": "wasm-pack build crates/row-wasm --release --target nodejs --out-dir ../../pkg-node",
     "build:wasm:web": "wasm-pack build crates/row-wasm --release --target web --out-dir ../../pkg-web",
-    "build:wasm": "npm run build:wasm:node && npm run build:wasm:web",
-    "verify": "tsx js/verify.ts",
-    "bench": "tsx js/bench.ts",
+    "build:wasm": "pnpm run build:wasm:node && pnpm run build:wasm:web",
+    "verify": "node js/verify.ts",
+    "bench": "node js/bench.ts",
     "bench:rust": "cargo bench",
     "check-types": "tsc --noEmit",
     "dev": "vite"
@@ -17,7 +18,6 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "mitata": "^1.0.34",
-    "tsx": "^4.21.0",
     "typescript": "^5.6.0",
     "vite": "^6.0.0"
   }
