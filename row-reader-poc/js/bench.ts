@@ -49,8 +49,15 @@ group('hot path (reader already constructed)', () => {
 });
 
 group('rust serialization (via WASM)', () => {
-  bench('serialize 1 row', () => wasmSchema.serialize_row(DEMO_ROW_JSON));
-  bench('serialize 1000 rows', () => wasmSchema.bench_serialize(1000, DEMO_ROW_JSON));
+  // serialize_row decodes JSON input every call (harness overhead). The
+  // 1000-row variant decodes once then serializes 1000 times, so its
+  // per-row cost (call time / 1000) reflects serialization alone.
+  bench('serialize 1 row (incl. JSON decode)', () =>
+    wasmSchema.serialize_row(DEMO_ROW_JSON),
+  );
+  bench('serialize 1000 rows (decode once)', () =>
+    wasmSchema.bench_serialize(1000, DEMO_ROW_JSON),
+  );
 });
 
 await run();

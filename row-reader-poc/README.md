@@ -92,8 +92,8 @@ JS reads vs JSON (mitata):
 | binary: get float64 (hot, no realloc)  | ~22 ns    |
 | binary: get string col                 | ~198 ns   |
 | binary: get json col                   | ~763 ns   |
-| WASM `serialize_row` (1 row)           | ~5.6 µs   |
-| WASM `bench_serialize` (1000, per row) | ~4.1 µs   |
+| WASM serialize 1 row (incl. JSON decode) | ~5.3 µs |
+| WASM serialize, decode once (per row)    | ~0.22 µs |
 
 **Read of the results.** Binary wins big for individual numeric reads (a
 `DataView` read is tens of ns vs ~1.1 µs to `JSON.parse` the whole row).
@@ -104,10 +104,13 @@ few columns per row rather than always materializing every row — which matches
 Zero's access pattern. String/`json` reads are dominated by `TextDecoder` /
 `JSON.parse`, as expected.
 
-The WASM `serialize_row` overhead (~5.6 µs vs ~0.1 µs pure Rust) is dominated by
-the JS↔WASM crossing **and** re-parsing the input row JSON string in Rust on
-every call. A real integration would feed columnar/typed data across the
-boundary instead of a JSON string per row.
+The schema is compiled once, so per-row serialization is just offset writes:
+decoding the row once and serializing 1000 times costs **~0.22 µs/row** in WASM
+(vs ~0.1 µs pure-native Rust — the gap is the per-row output allocation). The
+~5.3 µs single-row number is almost entirely the **one-time JSON decode** of the
+row input, which is a harness artifact: a real integration feeds already-typed
+DB-row values across the boundary, so that decode (and serde) disappears
+entirely. The earlier ~5.6 µs figure conflated JSON parsing with serialization.
 
 ## BigInt at the WASM boundary
 

@@ -1,9 +1,13 @@
 //! `wasm-bindgen` bindings over `row-core`.
 //!
-//! JS hands us the schema and each row as JSON strings; we return the binary
-//! row buffer as a `Uint8Array`. `int64` columns cross the boundary as decimal
-//! strings (Option A in the plan) to dodge wasm-bindgen's `i64`/`BigInt`
-//! friction, and `bytes` columns cross as arrays of `u8`.
+//! The schema is compiled once (`WasmSchema::new`); after that, serializing a
+//! row is just offset writes — there is no per-row schema work. JSON decoding
+//! of the row input is a harness convenience and is kept strictly separate from
+//! serialization (see `decode_row` vs `serialize_row`/`bench_serialize`).
+//!
+//! `int64` columns cross the boundary as decimal strings (Option A in the plan)
+//! to dodge wasm-bindgen's `i64`/`BigInt` friction; `bytes` columns cross as
+//! arrays of `u8`.
 
 use row_core::{ColumnDef, ColumnType, ColumnValue, RowSchema};
 use serde::Deserialize;
@@ -33,6 +37,35 @@ fn parse_type(s: &str) -> Result<ColumnType, JsError> {
     })
 }
 
+/// A decoded column value, owned and already in column order. Producing these
+/// is the (one-time, per-row) input-parsing step; once decoded, serialization
+/// borrows them and does zero parsing or name lookups.
+enum OwnedValue {
+    Null,
+    Bool(bool),
+    Int32(i32),
+    Int64(i64),
+    Float64(f64),
+    Str(String),
+    Json(String),
+    Bytes(Vec<u8>),
+}
+
+impl OwnedValue {
+    fn as_column_value(&self) -> ColumnValue<'_> {
+        match self {
+            OwnedValue::Null => ColumnValue::Null,
+            OwnedValue::Bool(v) => ColumnValue::Bool(*v),
+            OwnedValue::Int32(v) => ColumnValue::Int32(*v),
+            OwnedValue::Int64(v) => ColumnValue::Int64(*v),
+            OwnedValue::Float64(v) => ColumnValue::Float64(*v),
+            OwnedValue::Str(s) => ColumnValue::Str(s),
+            OwnedValue::Json(s) => ColumnValue::Json(s),
+            OwnedValue::Bytes(b) => ColumnValue::Bytes(b),
+        }
+    }
+}
+
 #[wasm_bindgen]
 pub struct WasmSchema {
     inner: RowSchema,
@@ -41,7 +74,8 @@ pub struct WasmSchema {
 #[wasm_bindgen]
 impl WasmSchema {
     /// Build a schema from a JSON array of column descriptors:
-    /// `[{ "name": string, "type": string, "nullable"?: bool }]`.
+    /// `[{ "name": string, "type": string, "nullable"?: bool }]`. Offsets and
+    /// the null-bitmap layout are computed here, once.
     #[wasm_bindgen(constructor)]
     pub fn new(schema_json: &str) -> Result<WasmSchema, JsError> {
         let descriptors: Vec<ColumnDescriptor> = serde_json::from_str(schema_json)
@@ -65,32 +99,84 @@ impl WasmSchema {
     /// Serialize one row (a JSON object of column values) into the binary
     /// layout. Returns an owned `Uint8Array`; JS reads it via `RowReader`.
     pub fn serialize_row(&self, row_json: &str) -> Result<Vec<u8>, JsError> {
+        let decoded = self.decode_row(row_json)?;
+        let values: Vec<ColumnValue<'_>> =
+            decoded.iter().map(OwnedValue::as_column_value).collect();
+        Ok(self.inner.serialize(&values))
+    }
+
+    /// Serialize `n` rows; returns total bytes written. The row is decoded
+    /// once, so the measured per-iteration cost is the serialization itself
+    /// (offset writes + output allocation), not JSON parsing — which is the
+    /// point of compiling the schema up front.
+    pub fn bench_serialize(&self, n: u32, row_json: &str) -> Result<u32, JsError> {
+        let decoded = self.decode_row(row_json)?;
+        let values: Vec<ColumnValue<'_>> =
+            decoded.iter().map(OwnedValue::as_column_value).collect();
+
+        let mut total = 0u32;
+        for _ in 0..n {
+            total = total.wrapping_add(self.inner.serialize(&values).len() as u32);
+        }
+        Ok(total)
+    }
+
+    /// Total fixed-section size in bytes (for diagnostics / tests).
+    #[wasm_bindgen(getter)]
+    pub fn fixed_section_size(&self) -> usize {
+        self.inner.fixed_section_size
+    }
+}
+
+impl WasmSchema {
+    /// Decode a JSON row object into owned column values in schema order. This
+    /// is the only place that parses row input; serialization never touches
+    /// JSON.
+    fn decode_row(&self, row_json: &str) -> Result<Vec<OwnedValue>, JsError> {
         let value: Value = serde_json::from_str(row_json)
             .map_err(|e| JsError::new(&format!("invalid row json: {e}")))?;
         let map = value
             .as_object()
             .ok_or_else(|| JsError::new("row json must be an object"))?;
 
-        let n = self.inner.columns.len();
-
-        // Pass 1: materialize owned storage for values that can't borrow
-        // straight from `map` — re-serialized JSON columns, decoded byte
-        // arrays, and int64s parsed out of their string form.
-        let mut json_strings: Vec<Option<String>> = vec![None; n];
-        let mut byte_bufs: Vec<Option<Vec<u8>>> = vec![None; n];
-        let mut int64s: Vec<i64> = vec![0; n];
-
-        for (i, col) in self.inner.columns.iter().enumerate() {
+        let mut out = Vec::with_capacity(self.inner.columns.len());
+        for col in &self.inner.columns {
             let name = &col.def.name;
             let Some(v) = present(map, name) else {
+                out.push(OwnedValue::Null);
                 continue;
             };
-            match col.def.col_type {
-                ColumnType::Json => {
-                    json_strings[i] = Some(serde_json::to_string(v).map_err(|e| {
-                        JsError::new(&format!("cannot serialize json column {name}: {e}"))
-                    })?);
+            let owned = match col.def.col_type {
+                ColumnType::Bool => OwnedValue::Bool(
+                    v.as_bool()
+                        .ok_or_else(|| JsError::new(&format!("bool column {name} invalid")))?,
+                ),
+                ColumnType::Int32 => {
+                    let x = v
+                        .as_i64()
+                        .ok_or_else(|| JsError::new(&format!("int32 column {name} invalid")))?;
+                    OwnedValue::Int32(x as i32)
                 }
+                ColumnType::Int64 => {
+                    let s = v.as_str().ok_or_else(|| {
+                        JsError::new(&format!("int64 column {name} must be a string"))
+                    })?;
+                    OwnedValue::Int64(s.parse().map_err(|e| {
+                        JsError::new(&format!("invalid int64 for column {name}: {e}"))
+                    })?)
+                }
+                ColumnType::Float64 => OwnedValue::Float64(
+                    v.as_f64()
+                        .ok_or_else(|| JsError::new(&format!("float64 column {name} invalid")))?,
+                ),
+                ColumnType::Str => OwnedValue::Str(
+                    v.as_str()
+                        .ok_or_else(|| JsError::new(&format!("string column {name} invalid")))?
+                        .to_owned(),
+                ),
+                ColumnType::Json => OwnedValue::Json(serde_json::to_string(v).map_err(|e| {
+                    JsError::new(&format!("cannot serialize json column {name}: {e}"))
+                })?),
                 ColumnType::Bytes => {
                     let arr = v.as_array().ok_or_else(|| {
                         JsError::new(&format!("bytes column {name} must be an array of u8"))
@@ -105,72 +191,12 @@ impl WasmSchema {
                             })?;
                         bytes.push(byte as u8);
                     }
-                    byte_bufs[i] = Some(bytes);
+                    OwnedValue::Bytes(bytes)
                 }
-                ColumnType::Int64 => {
-                    let s = v.as_str().ok_or_else(|| {
-                        JsError::new(&format!("int64 column {name} must be a string"))
-                    })?;
-                    int64s[i] = s.parse::<i64>().map_err(|e| {
-                        JsError::new(&format!("invalid int64 for column {name}: {e}"))
-                    })?;
-                }
-                _ => {}
-            }
-        }
-
-        // Pass 2: build the borrowed ColumnValue slice and serialize.
-        let mut values: Vec<ColumnValue<'_>> = Vec::with_capacity(n);
-        for (i, col) in self.inner.columns.iter().enumerate() {
-            let name = &col.def.name;
-            let Some(v) = present(map, name) else {
-                values.push(ColumnValue::Null);
-                continue;
             };
-            let cv = match col.def.col_type {
-                ColumnType::Bool => ColumnValue::Bool(
-                    v.as_bool()
-                        .ok_or_else(|| JsError::new(&format!("bool column {name} invalid")))?,
-                ),
-                ColumnType::Int32 => {
-                    let x = v
-                        .as_i64()
-                        .ok_or_else(|| JsError::new(&format!("int32 column {name} invalid")))?;
-                    ColumnValue::Int32(x as i32)
-                }
-                ColumnType::Int64 => ColumnValue::Int64(int64s[i]),
-                ColumnType::Float64 => ColumnValue::Float64(
-                    v.as_f64()
-                        .ok_or_else(|| JsError::new(&format!("float64 column {name} invalid")))?,
-                ),
-                ColumnType::Str => ColumnValue::Str(
-                    v.as_str()
-                        .ok_or_else(|| JsError::new(&format!("string column {name} invalid")))?,
-                ),
-                ColumnType::Json => ColumnValue::Json(json_strings[i].as_deref().unwrap()),
-                ColumnType::Bytes => ColumnValue::Bytes(byte_bufs[i].as_deref().unwrap()),
-            };
-            values.push(cv);
+            out.push(owned);
         }
-
-        Ok(self.inner.serialize(&values))
-    }
-
-    /// Serialize `n` copies of the same row; returns total bytes written. Used
-    /// to measure serialization throughput with minimal JS<->WASM crossings.
-    pub fn bench_serialize(&self, n: u32, row_json: &str) -> Result<u32, JsError> {
-        let mut total = 0u32;
-        for _ in 0..n {
-            let buf = self.serialize_row(row_json)?;
-            total = total.wrapping_add(buf.len() as u32);
-        }
-        Ok(total)
-    }
-
-    /// Total fixed-section size in bytes (for diagnostics / tests).
-    #[wasm_bindgen(getter)]
-    pub fn fixed_section_size(&self) -> usize {
-        self.inner.fixed_section_size
+        Ok(out)
     }
 }
 
