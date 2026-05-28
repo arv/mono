@@ -9,3 +9,6 @@
 node_modules
 *.tsbuildinfo
 dist
+
+# benchmark output
+threads-scaling.svg

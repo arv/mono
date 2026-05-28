@@ -1,14 +1,19 @@
 /// <reference lib="webworker" />
 /**
- * Browser producer: initializes its own wasm instance, serializes rows, and
- * transfers them (zero-copy) to the main thread in batches. Each row encodes
- * its producing worker so the main thread can verify provenance.
+ * Browser producer: initializes its own wasm instance (posts `ready` when done
+ * so the main thread can time trials without init overhead), then on `produce`
+ * serializes rows and transfers them (zero-copy) to the main thread in batches.
  */
 import init, {WasmSchema} from '../../pkg-web/row_wasm.js';
 import {demoSchemaJson} from '../demo-schema.ts';
 
-// `--target web` wasm must be initialized before first use.
-const ready = init().then(() => new WasmSchema(demoSchemaJson));
+const post = (self as DedicatedWorkerGlobalScope).postMessage.bind(self);
+
+let schema: WasmSchema;
+const ready = init().then(() => {
+  schema = new WasmSchema(demoSchemaJson);
+  post({ready: true});
+});
 
 interface ProduceMsg {
   type: 'produce';
@@ -19,9 +24,8 @@ interface ProduceMsg {
 
 self.onmessage = async (e: MessageEvent<ProduceMsg>) => {
   if (e.data?.type !== 'produce') return;
+  await ready;
   const {ring, count, chunk} = e.data;
-  const schema = await ready;
-  const post = (self as DedicatedWorkerGlobalScope).postMessage.bind(self);
 
   let batch: ArrayBuffer[] = [];
   for (let i = 0; i < count; i++) {
@@ -33,7 +37,6 @@ self.onmessage = async (e: MessageEvent<ProduceMsg>) => {
       active: (i & 1) === 0,
       metadata: {tags: ['a', 'b'], count: i},
     });
-    // serialize_row returns a Uint8Array over a fresh, exact-sized ArrayBuffer.
     batch.push(schema.serialize_row(rowJson).buffer as ArrayBuffer);
     if (batch.length >= chunk) {
       post({ring, buffers: batch}, batch); // transfer ownership to main

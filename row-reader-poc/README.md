@@ -28,8 +28,9 @@ row-reader-poc/
       queue.ts         #   Node: lock-free SPSC rings over one SharedArrayBuffer
       worker.ts        #   Node producer (worker_threads): serialize -> ring
       main.ts          #   Node consumer: drain all rings, decode + verify
+      bench.ts         #   Node rows/s-vs-threads sweep -> SVG plot
       browser.worker.ts #  browser producer: serialize -> transfer to main
-      browser.main.ts  #   browser consumer: decode + verify
+      browser.main.ts  #   browser rows/s-vs-threads benchmark (canvas chart)
   index.html           # single-worker browser smoke test
   threads.html         # multi-worker browser demo
 ```
@@ -67,6 +68,7 @@ pnpm run build:wasm        # builds pkg-node (bench/verify) + pkg-web (browser)
 
 pnpm run verify            # Rust->WASM->JS round-trip correctness check
 pnpm run threads           # N producer threads -> main, via a shared ring buffer
+pnpm run threads:bench     # rows/s vs thread count sweep -> threads-scaling.svg
 pnpm run bench             # JS read vs JSON.parse + WASM serialize throughput
 pnpm run bench:rust        # pure-Rust criterion: binary serialize vs serde_json
 cargo test -p row-core     # serializer unit tests
@@ -160,15 +162,33 @@ consumed 20000 rows in ~296ms from 4 threads:
 threads: OK — every thread delivered 5000 rows (~67k rows/s)
 ```
 
+`pnpm run threads:bench` sweeps the thread count (lean consumer, no per-row
+decode) and writes `threads-scaling.svg`. On a 4-core box throughput rises to
+~3 producers (3 producers + 1 consumer ≈ 4 cores), then dips as it
+oversubscribes:
+
+```
+threads= 1   147k rows/s
+threads= 3   306k rows/s   (peak, ~2x over 1 thread)
+threads= 8   258k rows/s
+```
+
+In production the Node path wouldn't use wasm at all — `row-core` can ship as a
+**native addon** (napi-rs, per-platform prebuilt `.node` binaries, the model TS
+7's `tsgo` uses), which removes the wasm↔JS copy and lets typed values cross the
+FFI directly (dropping serde). Faster in Node; the cost is a per-platform
+prebuild matrix vs wasm's single portable artifact.
+
 ### Browser (`pnpm run dev` → open `/threads.html`)
 
 Threads are Web Workers, each running the `--target web` wasm. Hand-off is
 `postMessage` with **transferable `ArrayBuffer`s** (zero-copy ownership move),
 batched to amortize message overhead — no `SharedArrayBuffer`, so no
-cross-origin-isolation (COOP/COEP) requirement. Verified here via `tsc` and a
-production `vite build` (which bundles both workers + the wasm asset); the
-decode/transfer logic is the same as the Node path, which is runtime-verified.
-Not yet executed in a real browser in this container.
+cross-origin-isolation (COOP/COEP) requirement. `threads.html` is a benchmark:
+it sweeps worker count and plots rows/s vs threads on a canvas. Verified here
+via `tsc` and a production `vite build` (which bundles both workers + the wasm
+asset); the decode/transfer logic matches the runtime-verified Node path. Not
+yet executed in a real browser in this container.
 
 A `SharedArrayBuffer` ring-buffer variant (like Node's) is also possible in the
 browser but needs COOP/COEP headers, and the main thread can't `Atomics.wait`
