@@ -48,7 +48,9 @@ export class RowReader {
         if (type === 'bytes') {
           return this.#bytes.slice(ptr, ptr + len);
         }
-        const str = RowReader.#decoder.decode(this.#bytes.subarray(ptr, ptr + len));
+        const str = RowReader.#decoder.decode(
+          this.#bytes.subarray(ptr, ptr + len),
+        );
         return type === 'json' ? JSON.parse(str) : str;
       }
     }

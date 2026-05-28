@@ -5,16 +5,17 @@
  */
 import {bench, group, run} from 'mitata';
 
-import {CompiledSchema} from './schema.ts';
-import {RowReader} from './row-reader.ts';
-import {demoSchema, demoSchemaJson, DEMO_ROW_JSON} from './demo-schema.ts';
 import {WasmSchema} from '../pkg-node/row_wasm.js';
+import {demoSchema, demoSchemaJson, DEMO_ROW_JSON} from './demo-schema.ts';
+import {RowReader} from './row-reader.ts';
+import {CompiledSchema} from './schema.ts';
 
 const schema = new CompiledSchema(demoSchema);
 const wasmSchema = new WasmSchema(demoSchemaJson);
 
 // Pre-serialize one row to a standalone ArrayBuffer for the read benchmarks.
-const binaryBuffer = wasmSchema.serialize_row(DEMO_ROW_JSON).buffer as ArrayBuffer;
+const binaryBuffer = wasmSchema.serialize_row(DEMO_ROW_JSON)
+  .buffer as ArrayBuffer;
 
 // Equivalent plain-JSON string for the baseline (int64 as strings, to match).
 const PLAIN_JSON = DEMO_ROW_JSON;
@@ -53,11 +54,9 @@ group('rust serialization (via WASM)', () => {
   // 1000-row variant decodes once then serializes 1000 times, so its
   // per-row cost (call time / 1000) reflects serialization alone.
   bench('serialize 1 row (incl. JSON decode)', () =>
-    wasmSchema.serialize_row(DEMO_ROW_JSON),
-  );
+    wasmSchema.serialize_row(DEMO_ROW_JSON));
   bench('serialize 1000 rows (decode once)', () =>
-    wasmSchema.bench_serialize(1000, DEMO_ROW_JSON),
-  );
+    wasmSchema.bench_serialize(1000, DEMO_ROW_JSON));
 });
 
 await run();

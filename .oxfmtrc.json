@@ -30,7 +30,6 @@
     "prod/sst/sst-env.d.ts",
     "apps/zbugs/public/um.js",
     "apps/zbugs/db/migrations/",
-    "**/__snapshots__/**",
-    "row-reader-poc"
+    "**/__snapshots__/**"
   ]
 }

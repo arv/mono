@@ -6,7 +6,7 @@ lazily through a `DataView`-backed `RowReader`. This POC targets **web only**
 (Node.js + browser); React Native wiring comes later.
 
 It is a **standalone sub-project**: it has its own Cargo workspace and its own
-`package.json`, and is intentionally *not* part of the monorepo's npm workspaces
+`package.json`, and is intentionally _not_ part of the monorepo's npm workspaces
 or its turbo/vitest/oxlint pipelines.
 
 ## Layout
@@ -86,16 +86,16 @@ Pure Rust (criterion):
 
 JS reads vs JSON (mitata):
 
-| benchmark                              | time      |
-| -------------------------------------- | --------- |
-| binary: new reader + get int64         | ~165 ns   |
-| json: `JSON.parse` + access int        | ~1.10 µs  |
-| binary: `toObject()` (all 6 cols)      | ~1.40 µs  |
-| json: `JSON.parse()` (full object)     | ~1.09 µs  |
-| binary: get float64 (hot, no realloc)  | ~22 ns    |
-| binary: get string col                 | ~198 ns   |
-| binary: get json col                   | ~763 ns   |
-| WASM serialize 1 row (incl. JSON decode) | ~5.3 µs |
+| benchmark                                | time     |
+| ---------------------------------------- | -------- |
+| binary: new reader + get int64           | ~165 ns  |
+| json: `JSON.parse` + access int          | ~1.10 µs |
+| binary: `toObject()` (all 6 cols)        | ~1.40 µs |
+| json: `JSON.parse()` (full object)       | ~1.09 µs |
+| binary: get float64 (hot, no realloc)    | ~22 ns   |
+| binary: get string col                   | ~198 ns  |
+| binary: get json col                     | ~763 ns  |
+| WASM serialize 1 row (incl. JSON decode) | ~5.3 µs  |
 | WASM serialize, decode once (per row)    | ~0.22 µs |
 
 **Read of the results.** Binary wins big for individual numeric reads (a
@@ -126,7 +126,7 @@ plan): `JSON.stringify` can't encode `BigInt`, and this sidesteps wasm-bindgen's
 ## Deviations from the original plan
 
 1. **Null bitmap sizing (correctness fix).** The plan sized the null bitmap by
-   the *number of nullable columns* but addressed bits by *full column index*.
+   the _number of nullable columns_ but addressed bits by _full column index_.
    That overflows the bitmap (corrupting the fixed section) once a nullable
    column sits past the last reserved bit. Both the Rust and TS sides here size
    the bitmap as `ceil(columns / 8)` — one bit per column — so they stay in

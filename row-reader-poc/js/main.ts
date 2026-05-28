@@ -1,9 +1,11 @@
-import {CompiledSchema} from './schema.ts';
-import {RowReader} from './row-reader.ts';
 import {demoSchema, DEMO_ROW_JSON} from './demo-schema.ts';
+import {RowReader} from './row-reader.ts';
+import {CompiledSchema} from './schema.ts';
 
 const schema = new CompiledSchema(demoSchema);
-const worker = new Worker(new URL('./worker.ts', import.meta.url), {type: 'module'});
+const worker = new Worker(new URL('./worker.ts', import.meta.url), {
+  type: 'module',
+});
 
 worker.onmessage = ({data: {buffer}}: MessageEvent<{buffer: ArrayBuffer}>) => {
   const row = new RowReader(schema, buffer);

@@ -5,9 +5,9 @@
  */
 import assert from 'node:assert/strict';
 
-import {CompiledSchema, type Schema} from './schema.ts';
-import {RowReader} from './row-reader.ts';
 import {WasmSchema} from '../pkg-node/row_wasm.js';
+import {RowReader} from './row-reader.ts';
+import {CompiledSchema, type Schema} from './schema.ts';
 
 const schemaDef: Schema = {
   columns: [
