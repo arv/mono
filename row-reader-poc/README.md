@@ -176,14 +176,17 @@ copying each row out of shared memory (`.slice`) vs reading it **in place**
 Throughput rises to ~3 producers (3 producers + 1 consumer ≈ 4 cores) then dips
 as it oversubscribes (peak ~300k rows/s on a 4-core box).
 
-Zero-copy is only **~1.0–1.1× (≈10% at peak)** here: for these tiny ~75-byte
-rows the per-row `.slice` is a small part of consumer cost — the per-row
-`Atomics` (load head/tail, store tail, notify) and the drain loop dominate. The
-gain is O(row bytes) while the atomics are fixed, so wider rows benefit more. The
-bigger consumer lever is **batch dequeue** (amortize the atomics over N rows, and
-notify producers only when the ring was full), which `threads:async` and the
-browser SAB consumer leave as a natural next step. The in-place reader is still
-the right shape for a real consumer regardless — it never allocates per row.
+Zero-copy is only **~1.0–1.1× on a 4-core box** (the consumer isn't the
+bottleneck there, and for these tiny ~75-byte rows the per-row `.slice` is a
+small part of consumer cost — the per-row `Atomics` and drain loop dominate).
+It helps more where the consumer **is** the wall: on a 10-core box at 6–16
+producers it ran ~1.15–1.22×. The gain is O(row bytes) while the atomics are
+fixed, so wider rows benefit more. (The bench warms up both paths, interleaves
+the two modes per thread count, and takes best-of-N — measuring one mode cold
+made zero-copy look _slower_ at low thread counts, a pure JIT artifact.) The
+bigger consumer lever is **batch dequeue** (amortize the atomics over N rows,
+notify only when the ring was full). The in-place reader is the right shape for
+a real consumer regardless — it never allocates per row.
 
 In production the Node path wouldn't use wasm at all — `row-core` can ship as a
 **native addon** (napi-rs, per-platform prebuilt `.node` binaries, the model TS

@@ -146,6 +146,7 @@ ${plots}
 }
 
 const TOTAL = Number(process.env.ROWS ?? 200_000);
+const REPEAT = Number(process.env.REPEAT ?? 3);
 const cores = availableParallelism();
 const maxThreads = Math.min(cores * 2, 16);
 const threadCounts = [...new Set([1, 2, 3, 4, 6, 8, 12, 16, maxThreads])]
@@ -153,33 +154,42 @@ const threadCounts = [...new Set([1, 2, 3, 4, 6, 8, 12, 16, maxThreads])]
   .sort((a, b) => a - b);
 
 console.log(
-  `cores=${cores}; ${TOTAL} rows/trial; thread counts: ${threadCounts.join(', ')}`,
+  `cores=${cores}; ${TOTAL} rows/trial; best of ${REPEAT}; thread counts: ${threadCounts.join(', ')}`,
 );
-await runTrial(2, Math.min(TOTAL, 20_000), 'copy'); // warm up
 
-const modes: {label: string; color: string; mode: Mode}[] = [
-  {label: 'copy (.slice per row)', color: '#ef4444', mode: 'copy'},
-  {label: 'zero-copy (in place)', color: '#2563eb', mode: 'zero-copy'},
-];
+// Warm up both code paths so neither is measured cold (the JIT confound).
+await runTrial(4, 20_000, 'copy');
+await runTrial(4, 20_000, 'zero-copy');
 
-const series: Series[] = [];
-for (const {label, color, mode} of modes) {
-  const points: Point[] = [];
-  for (const t of threadCounts) {
-    const p = await runTrial(t, TOTAL, mode);
-    points.push(p);
-  }
-  series.push({label, color, points});
-}
-
+const copyPts: Point[] = [];
+const zeroPts: Point[] = [];
 console.log('threads  copy      zero-copy');
-for (let i = 0; i < threadCounts.length; i++) {
-  const c = series[0].points[i].rowsPerSec;
-  const z = series[1].points[i].rowsPerSec;
+for (const t of threadCounts) {
+  // Tightly interleave the two modes and take best-of-REPEAT, so both see the
+  // same warmth / system state at each thread count.
+  let copyBest = 0;
+  let zeroBest = 0;
+  for (let r = 0; r < REPEAT; r++) {
+    copyBest = Math.max(
+      copyBest,
+      (await runTrial(t, TOTAL, 'copy')).rowsPerSec,
+    );
+    zeroBest = Math.max(
+      zeroBest,
+      (await runTrial(t, TOTAL, 'zero-copy')).rowsPerSec,
+    );
+  }
+  copyPts.push({threads: t, rowsPerSec: copyBest});
+  zeroPts.push({threads: t, rowsPerSec: zeroBest});
   console.log(
-    `${String(threadCounts[i]).padStart(7)}  ${`${(c / 1000).toFixed(0)}k`.padStart(7)}   ${`${(z / 1000).toFixed(0)}k`.padStart(7)}  (${(z / c).toFixed(2)}x)`,
+    `${String(t).padStart(7)}  ${`${(copyBest / 1000).toFixed(0)}k`.padStart(7)}   ${`${(zeroBest / 1000).toFixed(0)}k`.padStart(7)}  (${(zeroBest / copyBest).toFixed(2)}x)`,
   );
 }
+
+const series: Series[] = [
+  {label: 'copy (.slice per row)', color: '#ef4444', points: copyPts},
+  {label: 'zero-copy (in place)', color: '#2563eb', points: zeroPts},
+];
 
 const outUrl = new URL('../../threads-scaling.svg', import.meta.url);
 writeFileSync(outUrl, svgChart(series));
