@@ -210,6 +210,28 @@ are verified to be served (page + wasm asset). What is **not** run here is the
 page in a real browser — this container's network policy blocks the headless
 Chromium download (Playwright CDN returns 403), so open the pages manually.
 
+### Measured comparison (10-core machine)
+
+rows/s as a function of producer count, all three hand-offs:
+
+| threads |   Node SAB | Browser SAB | Browser postMessage |
+| ------: | ---------: | ----------: | ------------------: |
+|       1 |       475k |        385k |                113k |
+|       2 |       844k |        465k |                142k |
+|       3 |      1058k |        604k |                185k |
+|       4 |      1200k |        743k |                371k |
+|       6 |      1252k |   869k (pk) |           385k (pk) |
+|       8 | 1299k (pk) |        853k |                320k |
+
+- The **SAB ring beats postMessage ~2.3× at peak** (869k vs 385k) and ~3.4× at
+  one thread, and it scales smoothly then plateaus instead of collapsing —
+  postMessage was paying per-row buffer-transfer cost; the ring replaces that
+  with a memcpy into shared memory + atomics.
+- **Browser SAB reaches ~67% of Node SAB** with the same design; the gap is
+  browser-runtime overhead + the `Atomics.waitAsync` consumer being looser than
+  Node's tight drain loop. All three plateau around core count, so the SAB
+  variants are core/consumer-bound rather than hand-off-bound.
+
 True shared-_linear-memory_ wasm threads (one wasm module across all threads,
 e.g. via `wasm-bindgen-rayon`) compile here too; the blocker is the per-thread
 stack/TLS bootstrap glue, clean in a cross-origin-isolated browser but fiddly to
