@@ -5,6 +5,9 @@
 /pkg-node
 /pkg-web
 
+# native addon output (regenerate with `pnpm run build:native`)
+/pkg-native
+
 # JS deps / build
 node_modules
 *.tsbuildinfo

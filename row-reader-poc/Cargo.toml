@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/row-core", "crates/row-wasm"]
+members = [
+  "crates/row-core",
+  "crates/row-json",
+  "crates/row-wasm",
+  "crates/row-napi",
+]
 
 # Optimize for small + fast wasm. Profile settings must live in the workspace
 # root (cargo rejects them in member crates).

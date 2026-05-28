@@ -16,13 +16,17 @@ row-reader-poc/
   crates/
     row-core/          # pure Rust: schema, serializer, column types (+ unit tests)
       benches/serialize.rs   # criterion bench (binary vs serde_json)
-    row-wasm/          # wasm-bindgen bindings
+    row-json/          # shared JSON decode + serialize (used by both bindings)
+    row-wasm/          # wasm-bindgen bindings (thin wrapper over row-json)
+    row-napi/          # native Node addon (napi-rs, thin wrapper over row-json)
   js/
     schema.ts          # CompiledSchema (offsets computed once)
     row-reader.ts      # RowReader (DataView-based lazy column reads)
     demo-schema.ts     # schema shared by bench + browser smoke test
     verify.ts          # Node round-trip correctness check
     bench.ts           # mitata benchmark (binary reads vs JSON.parse)
+    native-bench.ts    # native (napi) vs wasm serialize comparison
+    native/            # loads + types the .node addon
     worker.ts/main.ts  # browser worker smoke test (postMessage transfer)
     threads/           # multi-thread producers -> single consumer
       queue.ts         #   SPSC rings over one SharedArrayBuffer (+ signal word)
@@ -64,6 +68,8 @@ TypeScript `CompiledSchema` compute byte-identical offsets.
   0.2.122): `cargo install wasm-bindgen-cli --version 0.2.122`
 - Node.js >= 22 (runs the `.ts` files directly via native type stripping — no transpile step)
 - pnpm 11.3 (via `corepack`; pinned by the `packageManager` field)
+- The native addon needs only `cargo` + a host C linker — no node-gyp/headers
+  (napi-rs uses the stable Node-API ABI, resolved at load time)
 
 ## Build & run
 
@@ -71,12 +77,14 @@ TypeScript `CompiledSchema` compute byte-identical offsets.
 # from row-reader-poc/
 pnpm install
 pnpm run build:wasm        # builds pkg-node (bench/verify) + pkg-web (browser)
+pnpm run build:native      # builds the native Node addon (pkg-native/row_napi.node)
 
 pnpm run verify            # Rust->WASM->JS round-trip correctness check
 pnpm run threads           # N producer threads -> main, via a shared ring buffer
 pnpm run threads:async     # validate Atomics.waitAsync consumer + sync producers
 pnpm run threads:bench     # rows/s vs thread count sweep -> threads-scaling.svg
 pnpm run bench             # JS read vs JSON.parse + WASM serialize throughput
+pnpm run bench:native      # native (napi) vs wasm serialize (needs both builds)
 pnpm run bench:rust        # pure-Rust criterion: binary serialize vs serde_json
 cargo test -p row-core     # serializer unit tests
 
@@ -140,6 +148,30 @@ plan): `JSON.stringify` can't encode `BigInt`, and this sidesteps wasm-bindgen's
 `RowReader` returns `int64` as a JS `BigInt` (`DataView.getBigInt64`).
 `bytes` columns cross as arrays of `u8`.
 
+## Native Node addon (napi, tsgo-style)
+
+For Node the wasm boundary is pure overhead. `row-napi` compiles the _same_
+`row-json` serializer to a native `.node` addon via **napi-rs** — a per-platform
+native binary that Node loads directly (the model TS 7's `tsgo` ships). No
+wasm-bindgen glue, no copy out of wasm linear memory, no JSON-only boundary
+required (it could take typed args; here it mirrors the wasm JSON API for an
+apples-to-apples comparison). `bench:native` first asserts the two produce
+byte-identical output, then benchmarks both.
+
+Measured (this dev container, Node 22, identical JSON inputs):
+
+| benchmark                           | native (napi) |    wasm |
+| ----------------------------------- | ------------: | ------: |
+| serialize 1 row (incl. JSON decode) |       ~3.4 µs | ~4.9 µs |
+| serialize, decode once (per row)    |        ~97 ns | ~181 ns |
+
+Native is ~1.4× on the single-row path and **~1.9× per row** once the JSON
+decode is amortized — and at ~97 ns/row it matches the pure-Rust criterion
+number, i.e. the wasm boundary (allocation + copy out of linear memory) was the
+entire gap. Production would build the `.node` per platform with `@napi-rs/cli`
+and ship prebuilt binaries (again, the tsgo model); this POC builds for the host
+only. wasm stays the single portable artifact for the browser.
+
 ## Multi-threaded production
 
 N producer threads each serialize rows with their own wasm instance and push
@@ -188,11 +220,10 @@ bigger consumer lever is **batch dequeue** (amortize the atomics over N rows,
 notify only when the ring was full). The in-place reader is the right shape for
 a real consumer regardless — it never allocates per row.
 
-In production the Node path wouldn't use wasm at all — `row-core` can ship as a
-**native addon** (napi-rs, per-platform prebuilt `.node` binaries, the model TS
-7's `tsgo` uses), which removes the wasm↔JS copy and lets typed values cross the
-FFI directly (dropping serde). Faster in Node; the cost is a per-platform
-prebuild matrix vs wasm's single portable artifact.
+In production the Node path wouldn't use wasm at all — it would use the native
+`row-napi` addon (see "Native Node addon" above), which is ~1.9×/row faster
+here. The cost is a per-platform prebuild matrix vs wasm's single portable
+artifact.
 
 ### Browser (`pnpm run dev`)
 

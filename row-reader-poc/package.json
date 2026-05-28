@@ -9,11 +9,13 @@
     "build:wasm:node": "pnpm run build:wasm:cargo && wasm-bindgen target/wasm32-unknown-unknown/release/row_wasm.wasm --out-dir pkg-node --target nodejs && echo '{\"type\":\"commonjs\"}' > pkg-node/package.json",
     "build:wasm:web": "pnpm run build:wasm:cargo && wasm-bindgen target/wasm32-unknown-unknown/release/row_wasm.wasm --out-dir pkg-web --target web",
     "build:wasm": "pnpm run build:wasm:node && pnpm run build:wasm:web",
+    "build:native": "cargo build --release -p row-napi && node js/native/copy-addon.ts",
     "verify": "node js/verify.ts",
     "threads": "node js/threads/main.ts",
     "threads:async": "node js/threads/async-verify.ts",
     "threads:bench": "node js/threads/bench.ts",
     "bench": "node js/bench.ts",
+    "bench:native": "node js/native-bench.ts",
     "bench:rust": "cargo bench",
     "check-types": "tsc --noEmit",
     "dev": "vite"
