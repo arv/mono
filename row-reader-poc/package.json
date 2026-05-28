@@ -10,6 +10,7 @@
     "build:wasm:web": "pnpm run build:wasm:cargo && wasm-bindgen target/wasm32-unknown-unknown/release/row_wasm.wasm --out-dir pkg-web --target web",
     "build:wasm": "pnpm run build:wasm:node && pnpm run build:wasm:web",
     "verify": "node js/verify.ts",
+    "threads": "node js/threads/main.ts",
     "bench": "node js/bench.ts",
     "bench:rust": "cargo bench",
     "check-types": "tsc --noEmit",

@@ -24,6 +24,10 @@ row-reader-poc/
     verify.ts          # Node round-trip correctness check
     bench.ts           # mitata benchmark (binary reads vs JSON.parse)
     worker.ts/main.ts  # browser worker smoke test (postMessage transfer)
+    threads/           # multi-thread producers -> main, via a shared ring buffer
+      queue.ts         #   lock-free SPSC rings over one SharedArrayBuffer
+      worker.ts        #   producer: serialize rows, push into its ring
+      main.ts          #   consumer: drain all rings, decode + verify
   index.html
 ```
 
@@ -59,6 +63,7 @@ pnpm install
 pnpm run build:wasm        # builds pkg-node (bench/verify) + pkg-web (browser)
 
 pnpm run verify            # Rust->WASM->JS round-trip correctness check
+pnpm run threads           # N producer threads -> main, via a shared ring buffer
 pnpm run bench             # JS read vs JSON.parse + WASM serialize throughput
 pnpm run bench:rust        # pure-Rust criterion: binary serialize vs serde_json
 cargo test -p row-core     # serializer unit tests
@@ -122,6 +127,41 @@ plan): `JSON.stringify` can't encode `BigInt`, and this sidesteps wasm-bindgen's
 `i64` friction. Rust parses them with `str::parse::<i64>()`. On the read side,
 `RowReader` returns `int64` as a JS `BigInt` (`DataView.getBigInt64`).
 `bytes` columns cross as arrays of `u8`.
+
+## Multi-threaded production (`pnpm run threads`)
+
+`js/threads/` spins up N producer threads that each serialize rows with their
+own wasm instance and push them to the main thread, which decodes every row
+with `RowReader`.
+
+- **Threads:** Node `worker_threads` (each worker runs its own single-threaded
+  wasm serializer — the wasm linear memory is _not_ shared).
+- **Hand-off:** one `SharedArrayBuffer` holding N lock-free **SPSC ring
+  buffers** (`queue.ts`), one per producer, drained by the single consumer.
+  Synchronization is pure `Atomics` (sequentially consistent in JS, so a
+  producer's slot writes before its `Atomics.store(head)` are visible once the
+  consumer observes the advanced head). The ring is bounded, so a full ring
+  blocks the producer (`Atomics.wait`) until the consumer frees a slot and
+  `Atomics.notify`s it — real backpressure.
+- **Verification:** each row encodes its producer (`user_id`, `name = tN#i`);
+  the consumer asserts provenance + that `metadata` round-trips, and that every
+  thread delivered exactly `ROWS` rows.
+
+Tunable via env: `THREADS` (default 4), `ROWS` per thread (5000), `CAPACITY`
+ring slots (256). Example: `THREADS=8 ROWS=3000 CAPACITY=16 pnpm run threads`.
+
+```
+4 threads x 5000 rows = 20000 rows, ring capacity 256 (KB shared: 256)
+consumed 20000 rows in ~296ms from 4 threads:
+  thread 0..3: 5000 rows each
+threads: OK — every thread delivered 5000 rows (~67k rows/s)
+```
+
+This is worker-thread parallelism with a shared-memory queue, _not_ shared wasm
+linear memory. True shared-linear-memory wasm threads (one wasm module across
+all threads, e.g. via `wasm-bindgen-rayon`) compile here too — the blocker is
+the per-thread stack/TLS bootstrap glue, which is clean in a cross-origin-
+isolated browser but fiddly to verify headlessly in Node.
 
 ## Deviations from the original plan
 
