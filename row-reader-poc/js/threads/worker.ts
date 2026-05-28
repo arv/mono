@@ -14,11 +14,12 @@ interface WorkerData {
   layout: Layout;
   ring: number;
   count: number;
+  notify?: boolean | undefined;
 }
 
-const {sab, layout, ring, count} = workerData as WorkerData;
+const {sab, layout, ring, count, notify} = workerData as WorkerData;
 
-const queue = new ThreadQueue(sab, layout);
+const queue = new ThreadQueue(sab, layout, {notify});
 const schema = new WasmSchema(demoSchemaJson);
 
 for (let i = 0; i < count; i++) {

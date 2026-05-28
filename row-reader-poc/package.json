@@ -11,6 +11,7 @@
     "build:wasm": "pnpm run build:wasm:node && pnpm run build:wasm:web",
     "verify": "node js/verify.ts",
     "threads": "node js/threads/main.ts",
+    "threads:async": "node js/threads/async-verify.ts",
     "threads:bench": "node js/threads/bench.ts",
     "bench": "node js/bench.ts",
     "bench:rust": "cargo bench",

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Row Reader POC — thread scaling (SharedArrayBuffer)</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        margin: 24px;
+      }
+      table {
+        border-collapse: collapse;
+        margin-top: 16px;
+      }
+      td,
+      th {
+        border: 1px solid #ccc;
+        padding: 4px 12px;
+        text-align: right;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Row Reader POC — thread scaling (SharedArrayBuffer ring)</h1>
+    <p>
+      Producer Web Workers push rows into per-worker ring buffers in a shared
+      <code>SharedArrayBuffer</code>, blocking on synchronous
+      <code>Atomics.wait</code> when full. The main thread drains them with
+      <code>Atomics.waitAsync</code>. Needs a cross-origin-isolated page
+      (COOP/COEP). The chart plots rows/s as a function of worker count.
+    </p>
+    <p id="status">starting…</p>
+    <canvas id="chart" width="760" height="440"></canvas>
+    <table>
+      <thead>
+        <tr>
+          <th>threads</th>
+          <th>rows/s</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <script type="module" src="./js/threads/browser-sab.main.ts"></script>
+  </body>
+</html>

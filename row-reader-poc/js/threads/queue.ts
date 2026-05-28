@@ -1,18 +1,25 @@
 /**
  * Lock-free SPSC ring buffers over a single `SharedArrayBuffer` — one ring per
- * producer thread, drained by a single consumer (the main thread). Each
- * producer owns its ring's `head`; the consumer owns every `tail`. All
- * synchronization uses `Atomics` (JS atomics are sequentially consistent, so a
- * producer's payload writes before its `Atomics.store(head)` are visible to the
- * consumer once it observes the advanced head).
+ * producer thread, drained by a single consumer. Each producer owns its ring's
+ * `head`; the consumer owns every `tail`. All synchronization uses `Atomics`
+ * (JS atomics are sequentially consistent, so a producer's payload writes before
+ * its `Atomics.store(head)` are visible to the consumer once it observes the
+ * advanced head).
+ *
+ * Producers block on a full ring with synchronous `Atomics.wait` (allowed on
+ * worker threads). When constructed with `{notify: true}`, each enqueue also
+ * bumps a global signal word and `Atomics.notify`s it, so a consumer can sleep
+ * on `Atomics.waitAsync` (the only option on a browser main thread) instead of
+ * busy-polling — see `drainAsync` in `drain.ts`.
  *
  * Layout of the shared buffer:
  *
  *   [ control int32s | data slots ]
- *     ^ per ring:       ^ numRings * capacity slots of `slotBytes`:
- *       head, tail        [ threadId i32 | len i32 | payload bytes ]
+ *     ^ [0] signal word, then       ^ numRings * capacity slots of `slotBytes`:
+ *       per ring: head, tail          [ threadId i32 | len i32 | payload bytes ]
  */
 
+const SIGNAL_IDX = 0; // global "row enqueued" counter (within the control pad)
 const CTRL_PAD_INTS = 8; // reserve a cache-line-ish gap before per-ring ints
 const SLOT_BYTES = 256; // 8-byte header + up to 248-byte payload
 const SLOT_HEADER = 8;
@@ -50,16 +57,24 @@ export interface Row {
 }
 
 export class ThreadQueue {
+  readonly numRings: number;
   readonly #i32: Int32Array;
   readonly #u8: Uint8Array;
   readonly #layout: Layout;
   readonly #mask: number;
+  readonly #notify: boolean;
 
-  constructor(sab: SharedArrayBuffer, layout: Layout) {
+  constructor(
+    sab: SharedArrayBuffer,
+    layout: Layout,
+    opts: {notify?: boolean | undefined} = {},
+  ) {
     this.#i32 = new Int32Array(sab);
     this.#u8 = new Uint8Array(sab);
     this.#layout = layout;
     this.#mask = layout.capacity - 1;
+    this.#notify = opts.notify ?? false;
+    this.numRings = layout.numRings;
   }
 
   #headIdx(ring: number): number {
@@ -102,6 +117,10 @@ export class ThreadQueue {
     this.#u8.set(bytes, byteBase + SLOT_HEADER);
 
     Atomics.store(this.#i32, headIdx, next); // publish
+    if (this.#notify) {
+      Atomics.add(this.#i32, SIGNAL_IDX, 1);
+      Atomics.notify(this.#i32, SIGNAL_IDX);
+    }
   }
 
   /**
@@ -133,5 +152,28 @@ export class ThreadQueue {
       return {threadId, bytes};
     }
     return null;
+  }
+
+  /** Current value of the global "row enqueued" signal word. */
+  loadSignal(): number {
+    return Atomics.load(this.#i32, SIGNAL_IDX);
+  }
+
+  /**
+   * Resolve once the signal word differs from `prevSignal` (a producer
+   * enqueued) or the timeout elapses. Uses `Atomics.waitAsync`, so it is safe
+   * to await on a browser main thread. Read `loadSignal()` *before* scanning
+   * the rings, then pass it here, to avoid a lost wakeup.
+   */
+  async waitForData(
+    prevSignal: number,
+    timeoutMs = Infinity,
+  ): Promise<'ok' | 'timed-out'> {
+    const res = Atomics.waitAsync(this.#i32, SIGNAL_IDX, prevSignal, timeoutMs);
+    if (!res.async) {
+      // 'not-equal' => already changed (data may be ready); 'timed-out' => waited.
+      return res.value === 'timed-out' ? 'timed-out' : 'ok';
+    }
+    return (await res.value) === 'timed-out' ? 'timed-out' : 'ok';
   }
 }

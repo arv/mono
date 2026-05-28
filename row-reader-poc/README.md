@@ -24,15 +24,21 @@ row-reader-poc/
     verify.ts          # Node round-trip correctness check
     bench.ts           # mitata benchmark (binary reads vs JSON.parse)
     worker.ts/main.ts  # browser worker smoke test (postMessage transfer)
-    threads/           # multi-thread producers -> main thread
-      queue.ts         #   Node: lock-free SPSC rings over one SharedArrayBuffer
+    threads/           # multi-thread producers -> single consumer
+      queue.ts         #   SPSC rings over one SharedArrayBuffer (+ signal word)
+      drain.ts         #   async consumer drain loop (Atomics.waitAsync)
       worker.ts        #   Node producer (worker_threads): serialize -> ring
-      main.ts          #   Node consumer: drain all rings, decode + verify
+      main.ts          #   Node consumer demo: drain + decode + verify
       bench.ts         #   Node rows/s-vs-threads sweep -> SVG plot
-      browser.worker.ts #  browser producer: serialize -> transfer to main
-      browser.main.ts  #   browser rows/s-vs-threads benchmark (canvas chart)
+      async-verify.ts  #   Node: Atomics.waitAsync consumer + sync producers
+      chart.ts         #   shared canvas chart + results table
+      browser.worker.ts      # browser producer: serialize -> transfer
+      browser.main.ts        # browser benchmark: postMessage/transfer
+      browser-sab.worker.ts  # browser producer: serialize -> SAB ring
+      browser-sab.main.ts    # browser benchmark: SharedArrayBuffer ring
   index.html           # single-worker browser smoke test
-  threads.html         # multi-worker browser demo
+  threads.html         # multi-worker benchmark (postMessage transfer)
+  threads-sab.html     # multi-worker benchmark (SharedArrayBuffer ring)
 ```
 
 ## Wire format
@@ -68,12 +74,13 @@ pnpm run build:wasm        # builds pkg-node (bench/verify) + pkg-web (browser)
 
 pnpm run verify            # Rust->WASM->JS round-trip correctness check
 pnpm run threads           # N producer threads -> main, via a shared ring buffer
+pnpm run threads:async     # validate Atomics.waitAsync consumer + sync producers
 pnpm run threads:bench     # rows/s vs thread count sweep -> threads-scaling.svg
 pnpm run bench             # JS read vs JSON.parse + WASM serialize throughput
 pnpm run bench:rust        # pure-Rust criterion: binary serialize vs serde_json
 cargo test -p row-core     # serializer unit tests
 
-pnpm run dev               # vite -> open the browser worker smoke test
+pnpm run dev               # vite (COOP/COEP) -> / , /threads.html , /threads-sab.html
 ```
 
 `build:wasm` compiles the crate to wasm once (`cargo build --target
@@ -179,20 +186,29 @@ In production the Node path wouldn't use wasm at all — `row-core` can ship as 
 FFI directly (dropping serde). Faster in Node; the cost is a per-platform
 prebuild matrix vs wasm's single portable artifact.
 
-### Browser (`pnpm run dev` → open `/threads.html`)
+### Browser (`pnpm run dev`)
 
-Threads are Web Workers, each running the `--target web` wasm. Hand-off is
-`postMessage` with **transferable `ArrayBuffer`s** (zero-copy ownership move),
-batched to amortize message overhead — no `SharedArrayBuffer`, so no
-cross-origin-isolation (COOP/COEP) requirement. `threads.html` is a benchmark:
-it sweeps worker count and plots rows/s vs threads on a canvas. Verified here
-via `tsc` and a production `vite build` (which bundles both workers + the wasm
-asset); the decode/transfer logic matches the runtime-verified Node path. Not
-yet executed in a real browser in this container.
+Two benchmark pages, both Web Workers running the `--target web` wasm, sweeping
+worker count and plotting rows/s vs threads on a canvas:
 
-A `SharedArrayBuffer` ring-buffer variant (like Node's) is also possible in the
-browser but needs COOP/COEP headers, and the main thread can't `Atomics.wait`
-(would use `Atomics.waitAsync` or polling).
+- **`/threads.html` — postMessage/transfer.** Each worker transfers its row
+  `ArrayBuffer`s to the main thread (zero-copy ownership move), batched. No
+  shared memory, so no COOP/COEP needed. On a 10-core box this peaked ~385k
+  rows/s — it's hand-off-bound: transferring ~100k tiny buffers is per-object
+  expensive.
+- **`/threads-sab.html` — SharedArrayBuffer ring.** The Node design, in the
+  browser: producers push into per-worker rings and block on synchronous
+  `Atomics.wait` when full; the main thread drains with **`Atomics.waitAsync`**
+  (it cannot `Atomics.wait`). Requires a cross-origin-isolated page —
+  `vite.config.ts` sets `Cross-Origin-Opener-Policy: same-origin` +
+  `Cross-Origin-Embedder-Policy: require-corp` on the dev and preview servers.
+
+The async-consumer + sync-producer + signal/notify protocol (the part unique to
+the SAB browser path) is validated headlessly in Node via `pnpm run
+threads:async` (`Atomics.waitAsync` works in Node too). The COOP/COEP headers
+are verified to be served (page + wasm asset). What is **not** run here is the
+page in a real browser — this container's network policy blocks the headless
+Chromium download (Playwright CDN returns 403), so open the pages manually.
 
 True shared-_linear-memory_ wasm threads (one wasm module across all threads,
 e.g. via `wasm-bindgen-rayon`) compile here too; the blocker is the per-thread
