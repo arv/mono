@@ -1,9 +1,13 @@
 /**
  * Node thread-scaling benchmark: runs the worker_threads + SharedArrayBuffer
  * pipeline at increasing thread counts and reports rows/s as a function of
- * threads. The consumer only drains (no per-row decode) so the curve reflects
- * producer (serialize) + hand-off scaling rather than single-consumer decode
- * cost. Writes an SVG plot. Run: `pnpm run threads:bench` (env ROWS).
+ * threads, for two consumer strategies:
+ *   - "copy"      — dequeue copies each row out of shared memory (`.slice`)
+ *   - "zero-copy" — consume reads each row in place, freeing the slot after
+ *
+ * The consumer otherwise does no per-row work, so the gap between the two lines
+ * is purely the per-row copy — i.e. how much it raises the single-consumer
+ * ceiling. Writes an SVG plot. Run: `pnpm run threads:bench` (env ROWS).
  */
 import {writeFileSync} from 'node:fs';
 import {availableParallelism} from 'node:os';
@@ -11,16 +15,19 @@ import {Worker} from 'node:worker_threads';
 
 import {computeLayout, ThreadQueue} from './queue.ts';
 
+type Mode = 'copy' | 'zero-copy';
+
 interface Point {
   threads: number;
-  rows: number;
-  ms: number;
   rowsPerSec: number;
 }
+
+const NOOP = () => {};
 
 async function runTrial(
   threads: number,
   totalRows: number,
+  mode: Mode,
   capacity = 1024,
 ): Promise<Point> {
   const layout = computeLayout(threads, capacity);
@@ -48,66 +55,93 @@ async function runTrial(
   const start = performance.now();
   while (consumed < totalRows) {
     if (workerError) throw workerError;
-    const row = queue.dequeue(scan);
-    if (row === null) {
-      await new Promise(resolve => setImmediate(resolve));
-      continue;
+    if (mode === 'copy') {
+      const row = queue.dequeue(scan);
+      if (row === null) {
+        await new Promise(resolve => setImmediate(resolve));
+        continue;
+      }
+      scan = (row.threadId + 1) % threads;
+    } else {
+      const ring = queue.consume(scan, NOOP);
+      if (ring === -1) {
+        await new Promise(resolve => setImmediate(resolve));
+        continue;
+      }
+      scan = (ring + 1) % threads;
     }
-    scan = (row.threadId + 1) % threads;
     consumed++;
   }
   const ms = performance.now() - start;
   await Promise.all(workers.map(w => w.terminate()));
-  return {threads, rows: totalRows, ms, rowsPerSec: (totalRows / ms) * 1000};
+  return {threads, rowsPerSec: (totalRows / ms) * 1000};
 }
 
-function svgChart(points: Point[]): string {
+interface Series {
+  label: string;
+  color: string;
+  points: Point[];
+}
+
+function svgChart(series: Series[]): string {
   const W = 760;
-  const H = 440;
-  const m = {l: 80, r: 24, t: 48, b: 56};
+  const H = 460;
+  const m = {l: 80, r: 24, t: 60, b: 56};
   const iw = W - m.l - m.r;
   const ih = H - m.t - m.b;
-  const xMax = Math.max(...points.map(p => p.threads));
-  const yMax = Math.max(...points.map(p => p.rowsPerSec)) * 1.1;
+  const all = series.flatMap(s => s.points);
+  const xMax = Math.max(...all.map(p => p.threads));
+  const yMax = Math.max(...all.map(p => p.rowsPerSec)) * 1.1;
   const x = (t: number) => m.l + (t / xMax) * iw;
   const y = (v: number) => m.t + ih - (v / yMax) * ih;
 
-  const yTicks = 5;
   const grid: string[] = [];
-  for (let i = 0; i <= yTicks; i++) {
-    const v = (yMax / yTicks) * i;
+  for (let i = 0; i <= 5; i++) {
+    const v = (yMax / 5) * i;
     const yy = y(v);
     grid.push(
       `<line x1="${m.l}" y1="${yy}" x2="${m.l + iw}" y2="${yy}" stroke="#eee"/>` +
         `<text x="${m.l - 10}" y="${yy + 4}" text-anchor="end" font-size="12" fill="#555">${(v / 1000).toFixed(0)}k</text>`,
     );
   }
-  const xLabels = points
+  const xLabels = all
+    .map(p => p.threads)
+    .filter((t, i, a) => a.indexOf(t) === i)
     .map(
-      p =>
-        `<text x="${x(p.threads)}" y="${m.t + ih + 22}" text-anchor="middle" font-size="12" fill="#555">${p.threads}</text>`,
-    )
-    .join('');
-  const poly = points.map(p => `${x(p.threads)},${y(p.rowsPerSec)}`).join(' ');
-  const dots = points
-    .map(
-      p =>
-        `<circle cx="${x(p.threads)}" cy="${y(p.rowsPerSec)}" r="3.5" fill="#2563eb"/>` +
-        `<text x="${x(p.threads)}" y="${y(p.rowsPerSec) - 9}" text-anchor="middle" font-size="11" fill="#2563eb">${(p.rowsPerSec / 1000).toFixed(0)}k</text>`,
+      t =>
+        `<text x="${x(t)}" y="${m.t + ih + 22}" text-anchor="middle" font-size="12" fill="#555">${t}</text>`,
     )
     .join('');
 
+  const plots = series
+    .map((s, si) => {
+      const poly = s.points
+        .map(p => `${x(p.threads)},${y(p.rowsPerSec)}`)
+        .join(' ');
+      const dots = s.points
+        .map(
+          p =>
+            `<circle cx="${x(p.threads)}" cy="${y(p.rowsPerSec)}" r="3.5" fill="${s.color}"/>`,
+        )
+        .join('');
+      const legendY = 44 + si * 18;
+      const legend =
+        `<line x1="${m.l}" y1="${legendY}" x2="${m.l + 24}" y2="${legendY}" stroke="${s.color}" stroke-width="2"/>` +
+        `<text x="${m.l + 30}" y="${legendY + 4}" font-size="12" fill="#333">${s.label}</text>`;
+      return `<polyline points="${poly}" fill="none" stroke="${s.color}" stroke-width="2"/>${dots}${legend}`;
+    })
+    .join('\n');
+
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" font-family="sans-serif">
 <rect width="${W}" height="${H}" fill="white"/>
-<text x="${W / 2}" y="26" text-anchor="middle" font-size="16" fill="#111">Row serialization throughput vs threads (Node worker_threads + wasm)</text>
+<text x="${W / 2}" y="26" text-anchor="middle" font-size="16" fill="#111">Row throughput vs threads — copy vs zero-copy consumer (Node)</text>
 ${grid.join('\n')}
 <line x1="${m.l}" y1="${m.t}" x2="${m.l}" y2="${m.t + ih}" stroke="#999"/>
 <line x1="${m.l}" y1="${m.t + ih}" x2="${m.l + iw}" y2="${m.t + ih}" stroke="#999"/>
 <text x="${m.l + iw / 2}" y="${H - 12}" text-anchor="middle" font-size="13" fill="#333">threads</text>
 <text x="18" y="${m.t + ih / 2}" text-anchor="middle" font-size="13" fill="#333" transform="rotate(-90 18 ${m.t + ih / 2})">rows / second</text>
 ${xLabels}
-<polyline points="${poly}" fill="none" stroke="#2563eb" stroke-width="2"/>
-${dots}
+${plots}
 </svg>`;
 }
 
@@ -121,17 +155,32 @@ const threadCounts = [...new Set([1, 2, 3, 4, 6, 8, 12, 16, maxThreads])]
 console.log(
   `cores=${cores}; ${TOTAL} rows/trial; thread counts: ${threadCounts.join(', ')}`,
 );
-await runTrial(2, Math.min(TOTAL, 20_000)); // warm up
+await runTrial(2, Math.min(TOTAL, 20_000), 'copy'); // warm up
 
-const points: Point[] = [];
-for (const t of threadCounts) {
-  const p = await runTrial(t, TOTAL);
-  points.push(p);
+const modes: {label: string; color: string; mode: Mode}[] = [
+  {label: 'copy (.slice per row)', color: '#ef4444', mode: 'copy'},
+  {label: 'zero-copy (in place)', color: '#2563eb', mode: 'zero-copy'},
+];
+
+const series: Series[] = [];
+for (const {label, color, mode} of modes) {
+  const points: Point[] = [];
+  for (const t of threadCounts) {
+    const p = await runTrial(t, TOTAL, mode);
+    points.push(p);
+  }
+  series.push({label, color, points});
+}
+
+console.log('threads  copy      zero-copy');
+for (let i = 0; i < threadCounts.length; i++) {
+  const c = series[0].points[i].rowsPerSec;
+  const z = series[1].points[i].rowsPerSec;
   console.log(
-    `threads=${String(t).padStart(2)}  ${(p.rowsPerSec / 1000).toFixed(0).padStart(6)}k rows/s  (${p.ms.toFixed(0)}ms)`,
+    `${String(threadCounts[i]).padStart(7)}  ${`${(c / 1000).toFixed(0)}k`.padStart(7)}   ${`${(z / 1000).toFixed(0)}k`.padStart(7)}  (${(z / c).toFixed(2)}x)`,
   );
 }
 
 const outUrl = new URL('../../threads-scaling.svg', import.meta.url);
-writeFileSync(outUrl, svgChart(points));
+writeFileSync(outUrl, svgChart(series));
 console.log(`wrote ${outUrl.pathname}`);

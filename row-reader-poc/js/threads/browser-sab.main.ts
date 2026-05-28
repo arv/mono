@@ -12,7 +12,7 @@ import {demoSchema} from '../demo-schema.ts';
 import {RowReader} from '../row-reader.ts';
 import {CompiledSchema} from '../schema.ts';
 import {addRow, drawChart, type Point} from './chart.ts';
-import {drainAsync} from './drain.ts';
+import {drainAsyncInPlace} from './drain.ts';
 import {computeLayout, ThreadQueue} from './queue.ts';
 
 const TOTAL = 100_000; // rows per trial, split across workers
@@ -68,12 +68,14 @@ async function runTrial(
   }
 
   let sanityDone = !sanityCheck;
-  await drainAsync(
+  // One reader over the shared buffer, repositioned per row — no per-row copy.
+  const reader = new RowReader(schema, queue.buffer);
+  await drainAsyncInPlace(
     queue,
     TOTAL,
-    row => {
+    (_threadId, byteOffset) => {
       if (!sanityDone) {
-        const reader = new RowReader(schema, row.bytes.buffer as ArrayBuffer);
+        reader.reposition(byteOffset);
         if (typeof reader.get('name') !== 'string') {
           throw new Error('sanity decode failed');
         }

@@ -58,6 +58,7 @@ export interface Row {
 
 export class ThreadQueue {
   readonly numRings: number;
+  readonly buffer: SharedArrayBuffer; // for zero-copy in-place readers
   readonly #i32: Int32Array;
   readonly #u8: Uint8Array;
   readonly #layout: Layout;
@@ -69,6 +70,7 @@ export class ThreadQueue {
     layout: Layout,
     opts: {notify?: boolean | undefined} = {},
   ) {
+    this.buffer = sab;
     this.#i32 = new Int32Array(sab);
     this.#u8 = new Uint8Array(sab);
     this.#layout = layout;
@@ -152,6 +154,39 @@ export class ThreadQueue {
       return {threadId, bytes};
     }
     return null;
+  }
+
+  /**
+   * Zero-copy consume: scan rings from `scanStart`, and for the first available
+   * row invoke `fn` with its `threadId` and the payload's `byteOffset`/`len`
+   * *into `this.buffer`* — the consumer reads in place (e.g. via a `RowReader`
+   * repositioned to `byteOffset`) before the slot is freed. Returns the ring
+   * index consumed, or -1 if all rings are empty. No per-row allocation/copy.
+   */
+  consume(
+    scanStart: number,
+    fn: (threadId: number, byteOffset: number, len: number) => void,
+  ): number {
+    const {numRings} = this.#layout;
+    for (let k = 0; k < numRings; k++) {
+      const ring = (scanStart + k) % numRings;
+      const headIdx = this.#headIdx(ring);
+      const tailIdx = this.#tailIdx(ring);
+      const tail = Atomics.load(this.#i32, tailIdx);
+      if (Atomics.load(this.#i32, headIdx) === tail) continue; // empty
+
+      const byteBase = this.#slotByteBase(ring, tail);
+      const intBase = byteBase >> 2;
+      const threadId = this.#i32[intBase];
+      const len = this.#i32[intBase + 1];
+
+      fn(threadId, byteBase + SLOT_HEADER, len); // read in place before freeing
+
+      Atomics.store(this.#i32, tailIdx, (tail + 1) & this.#mask);
+      Atomics.notify(this.#i32, tailIdx); // wake a producer blocked on full
+      return ring;
+    }
+    return -1;
   }
 
   /** Current value of the global "row enqueued" signal word. */

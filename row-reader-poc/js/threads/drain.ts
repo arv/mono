@@ -1,6 +1,35 @@
 import {type Row, ThreadQueue} from './queue.ts';
 
 /**
+ * Zero-copy variant of {@link drainAsync}: `onRow` receives the row's
+ * `byteOffset`/`len` into `queue.buffer` and must read it in place (the slot is
+ * freed as soon as `onRow` returns). No per-row copy out of shared memory.
+ */
+export async function drainAsyncInPlace(
+  queue: ThreadQueue,
+  total: number,
+  onRow: (threadId: number, byteOffset: number, len: number) => void,
+  opts: {timeoutMs?: number | undefined} = {},
+): Promise<void> {
+  const deadline = opts.timeoutMs ? Date.now() + opts.timeoutMs : Infinity;
+  let consumed = 0;
+  let scan = 0;
+  while (consumed < total) {
+    const signal = queue.loadSignal();
+    const ring = queue.consume(scan, onRow);
+    if (ring !== -1) {
+      scan = (ring + 1) % queue.numRings;
+      consumed++;
+      continue;
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`drain timed out at ${consumed}/${total} rows`);
+    }
+    await queue.waitForData(signal, 1000);
+  }
+}
+
+/**
  * Consume `total` rows from the queue, sleeping on `Atomics.waitAsync` when all
  * rings are empty (so it works on a browser main thread, which cannot
  * `Atomics.wait`). Producers must run a queue constructed with `{notify: true}`.

@@ -169,16 +169,21 @@ consumed 20000 rows in ~296ms from 4 threads:
 threads: OK — every thread delivered 5000 rows (~67k rows/s)
 ```
 
-`pnpm run threads:bench` sweeps the thread count (lean consumer, no per-row
-decode) and writes `threads-scaling.svg`. On a 4-core box throughput rises to
-~3 producers (3 producers + 1 consumer ≈ 4 cores), then dips as it
-oversubscribes:
+`pnpm run threads:bench` sweeps the thread count for two consumer strategies —
+copying each row out of shared memory (`.slice`) vs reading it **in place**
+(zero-copy: `queue.consume` hands the consumer a `byteOffset`, and a single
+`RowReader` is `reposition`ed onto each slot) — and writes `threads-scaling.svg`.
+Throughput rises to ~3 producers (3 producers + 1 consumer ≈ 4 cores) then dips
+as it oversubscribes (peak ~300k rows/s on a 4-core box).
 
-```
-threads= 1   147k rows/s
-threads= 3   306k rows/s   (peak, ~2x over 1 thread)
-threads= 8   258k rows/s
-```
+Zero-copy is only **~1.0–1.1× (≈10% at peak)** here: for these tiny ~75-byte
+rows the per-row `.slice` is a small part of consumer cost — the per-row
+`Atomics` (load head/tail, store tail, notify) and the drain loop dominate. The
+gain is O(row bytes) while the atomics are fixed, so wider rows benefit more. The
+bigger consumer lever is **batch dequeue** (amortize the atomics over N rows, and
+notify producers only when the ring was full), which `threads:async` and the
+browser SAB consumer leave as a natural next step. The in-place reader is still
+the right shape for a real consumer regardless — it never allocates per row.
 
 In production the Node path wouldn't use wasm at all — `row-core` can ship as a
 **native addon** (napi-rs, per-platform prebuilt `.node` binaries, the model TS

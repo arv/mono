@@ -10,7 +10,7 @@ import {Worker} from 'node:worker_threads';
 import {demoSchema} from '../demo-schema.ts';
 import {RowReader} from '../row-reader.ts';
 import {CompiledSchema} from '../schema.ts';
-import {drainAsync} from './drain.ts';
+import {drainAsyncInPlace} from './drain.ts';
 import {computeLayout, ThreadQueue} from './queue.ts';
 
 const THREADS = Number(process.env.THREADS ?? 4);
@@ -33,17 +33,22 @@ for (let ring = 0; ring < THREADS; ring++) {
 }
 
 const counts = new Array<number>(THREADS).fill(0);
+// One reader over the shared buffer, repositioned per row — zero-copy in-place.
+const reader = new RowReader(schema, queue.buffer);
 const startedAt = performance.now();
 
-await drainAsync(
+await drainAsyncInPlace(
   queue,
   total,
-  row => {
-    const reader = new RowReader(schema, row.bytes.buffer as ArrayBuffer);
-    if (reader.get('user_id') !== BigInt(row.threadId)) {
-      throw new Error(`thread ${row.threadId}: wrong user_id`);
+  (threadId, byteOffset) => {
+    reader.reposition(byteOffset);
+    if (reader.get('user_id') !== BigInt(threadId)) {
+      throw new Error(`thread ${threadId}: wrong user_id`);
     }
-    counts[row.threadId]++;
+    if (reader.get('name') !== `t${threadId}#${counts[threadId]}`) {
+      throw new Error(`thread ${threadId}: wrong name`);
+    }
+    counts[threadId]++;
   },
   {timeoutMs: 30_000},
 );
