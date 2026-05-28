@@ -1,0 +1,11 @@
+# Rust build output
+/target
+
+# wasm-pack output (regenerate with `npm run build:wasm`)
+/pkg-node
+/pkg-web
+
+# JS deps / build
+node_modules
+*.tsbuildinfo
+dist
