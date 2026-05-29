@@ -11,6 +11,7 @@ crate-type = ["cdylib"]
 napi = { version = "2", default-features = false, features = ["napi8"] }
 napi-derive = "2"
 row-json = { path = "../row-json" }
+ivm = { path = "../ivm" }
 
 [build-dependencies]
 napi-build = "2"

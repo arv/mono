@@ -28,6 +28,8 @@ row-reader-poc/
     bench.ts           # mitata benchmark (binary reads vs JSON.parse)
     native-bench.ts    # native (napi) vs wasm serialize comparison
     native/            # loads + types the .node addon
+    ivm-bench.ts       # IVM pipeline: native vs wasm vs JS reference
+    ivm/reference.ts   # faithful JS IVM baseline (mirror of the ivm crate)
     worker.ts/main.ts  # browser worker smoke test (postMessage transfer)
     threads/           # multi-thread producers -> single consumer
       queue.ts         #   SPSC rings over one SharedArrayBuffer (+ signal word)
@@ -86,6 +88,7 @@ pnpm run threads:async     # validate Atomics.waitAsync consumer + sync producer
 pnpm run threads:bench     # rows/s vs thread count sweep -> threads-scaling.svg
 pnpm run bench             # JS read vs JSON.parse + WASM serialize throughput
 pnpm run bench:native      # native (napi) vs wasm serialize (needs both builds)
+pnpm run bench:ivm         # IVM pipeline: native vs wasm vs JS (needs both builds)
 pnpm run bench:rust        # pure-Rust criterion: binary serialize vs serde_json
 cargo test -p row-core     # serializer unit tests
 
@@ -300,6 +303,38 @@ Deferred (the bulk of the engine): the pull / `fetch` hydration path (lazy
 streams + `yield`), relationships / `child` changes, and the stateful operators
 — `join` / `flipped-join`, `exists`, `take` / `skip`, `fan-in` / `fan-out`, and
 constraints.
+
+### Performance: a naive port loses to V8
+
+`bench:ivm` runs an identical filter-pipeline workload (1000 rows hydrated +
+10,000 membership-flipping edits) as native (napi), wasm, and the JS reference,
+and asserts all three agree on the result. Unlike serialization, the naive
+port **loses**:
+
+| impl           | time/iter |        vs JS |
+| -------------- | --------: | -----------: |
+| js (reference) |   ~1.8 ms |         1.0x |
+| native (napi)  |   ~7.7 ms | ~4.3x slower |
+| wasm           |  ~15.3 ms | ~8.5x slower |
+
+(A first cut with `BTreeMap<String, Value>` rows was ~2x worse again — ~15 ms
+native / ~33 ms wasm — because each row allocated column-name `String`s + tree
+nodes. Switching to schema-indexed, `Rc`-shared rows roughly halved it.)
+
+Why: the workload is dominated by short-lived small-row allocation churn —
+exactly what V8's generational GC + escape analysis excel at (nursery
+bump-allocation, scalar replacement). Rust's per-object `malloc`/`free` can't
+match that, and wasm's allocator is slower still. To beat V8 here the Rust IVM
+needs allocation-conscious design: arenas / row pools, stack-allocated operator
+emits (no `Vec<Change>` per push), and inline sort keys (no `Vec<Value>` per
+index op).
+
+**Caveat — this microbenchmark flatters V8.** Small state + high churn is its
+sweet spot. A server's IVM maintains _large, long-lived_ indexes (joins over
+millions of rows), where Rust's compact, GC-free, cache-friendly memory should
+win and V8's GC pauses hurt. That large-state regime is the one to measure
+before drawing server-side conclusions — and it's also where wasm's gap to JS
+should shrink.
 
 ## Deviations from the original plan
 

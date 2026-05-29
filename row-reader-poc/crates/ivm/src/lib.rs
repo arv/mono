@@ -13,8 +13,10 @@ pub mod change;
 pub mod ops;
 pub mod row;
 pub mod value;
+pub mod workload;
 
 pub use change::Change;
 pub use ops::{Filter, MemorySource, Operator, Pipeline, View};
-pub use row::{Comparator, Row};
+pub use row::{Comparator, Row, Schema};
 pub use value::Value;
+pub use workload::filter_bench;

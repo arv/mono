@@ -44,3 +44,10 @@ impl WasmSchema {
         self.inner.fixed_section_size()
     }
 }
+
+/// IVM filter-pipeline benchmark workload (see `ivm::filter_bench`), exposed for
+/// the native-vs-wasm-vs-JS comparison in `js/ivm-bench.ts`.
+#[wasm_bindgen]
+pub fn ivm_filter_bench(rows: u32, pushes: u32) -> u32 {
+    ivm::filter_bench(rows, pushes)
+}

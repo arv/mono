@@ -15,9 +15,11 @@ export interface NativeSchema {
 
 interface NativeAddon {
   NativeSchema: new (schemaJson: string) => NativeSchema;
+  ivmFilterBench: (rows: number, pushes: number) => number;
 }
 
 const require = createRequire(import.meta.url);
 const addon = require('../../pkg-native/row_napi.node') as NativeAddon;
 
 export const NativeSchema = addon.NativeSchema;
+export const ivmFilterBench = addon.ivmFilterBench;

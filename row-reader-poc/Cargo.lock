@@ -502,6 +502,7 @@ dependencies = [
 name = "row-napi"
 version = "0.0.0"
 dependencies = [
+ "ivm",
  "napi",
  "napi-build",
  "napi-derive",
@@ -512,6 +513,7 @@ dependencies = [
 name = "row-wasm"
 version = "0.0.0"
 dependencies = [
+ "ivm",
  "row-json",
  "wasm-bindgen",
 ]

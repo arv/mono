@@ -220,28 +220,36 @@ impl Pipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::row::Schema;
+
+    // Test schema: columns [id, active, score] at indices 0, 1, 2.
+    fn schema() -> std::rc::Rc<Schema> {
+        Schema::new(&["id", "active", "score"])
+    }
 
     fn row(id: i64, active: bool) -> Row {
-        Row::new().with("id", id).with("active", active)
+        Row::new(vec![Value::Int(id), Value::Bool(active), Value::Float(0.0)])
     }
 
     fn ids(view: &View) -> Vec<i64> {
         view.rows()
             .iter()
-            .map(|r| match r.get("id") {
-                Some(Value::Int(n)) => *n,
+            .map(|r| match r.get(0) {
+                Value::Int(n) => *n,
                 _ => panic!("missing id"),
             })
             .collect()
     }
 
     fn build() -> Pipeline {
-        let cmp = Comparator::new(&["id"]);
+        let schema = schema();
+        let cmp = Comparator::new(&schema, &["id"]);
+        let active = schema.index_of("active").unwrap();
         let mut source = MemorySource::new(cmp.clone());
         source.insert(row(1, true));
         source.insert(row(2, false));
         source.insert(row(3, true));
-        let filter = Filter::new(|r| r.get("active") == Some(&Value::Bool(true)));
+        let filter = Filter::new(move |r| r.get(active) == &Value::Bool(true));
         let mut pipeline = Pipeline::new(source, vec![Box::new(filter)], View::new(cmp));
         pipeline.hydrate();
         pipeline
@@ -293,19 +301,14 @@ mod tests {
     #[test]
     fn edit_content_keeps_membership_and_updates_row() {
         let mut p = build();
-        let new = Row::new()
-            .with("id", 1)
-            .with("active", true)
-            .with("name", "x");
+        // Same id + still active, but the score (index 2) changes.
+        let new = Row::new(vec![Value::Int(1), Value::Bool(true), Value::Float(9.9)]);
         p.push(Change::Edit {
             old: row(1, true),
             new: new.clone(),
         });
         assert_eq!(ids(p.view()), vec![1, 3]);
-        assert_eq!(
-            p.view().rows()[0].get("name"),
-            Some(&Value::Str("x".to_owned()))
-        );
+        assert_eq!(p.view().rows()[0].get(2), &Value::Float(9.9));
     }
 
     #[test]
