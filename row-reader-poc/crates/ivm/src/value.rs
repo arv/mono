@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::hash::{Hash, Hasher};
 
 /// A column value. Mirrors zql's `Value` (`null | bool | number | string`),
 /// with `int64` kept distinct from `float64` like the binary serializer.
@@ -53,6 +54,21 @@ impl PartialEq for Value {
 }
 
 impl Eq for Value {}
+
+// Consistent with `Eq` above (total order): floats hash by bit pattern so
+// `NaN == NaN`, matching the comparison used for sort keys.
+impl Hash for Value {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        core::mem::discriminant(self).hash(state);
+        match self {
+            Value::Null => {}
+            Value::Bool(b) => b.hash(state),
+            Value::Int(i) => i.hash(state),
+            Value::Float(f) => f.to_bits().hash(state),
+            Value::Str(s) => s.hash(state),
+        }
+    }
+}
 
 impl From<bool> for Value {
     fn from(v: bool) -> Self {

@@ -5,3 +5,6 @@ edition = "2021"
 publish = false
 
 [dependencies]
+# Fast (non-DoS-resistant) hasher — std's default SipHash is the wrong tradeoff
+# for an internal index; this is closer to V8's Map hashing.
+rustc-hash = "2"

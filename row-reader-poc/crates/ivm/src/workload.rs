@@ -1,11 +1,12 @@
 use crate::{Change, Comparator, Filter, MemorySource, Pipeline, Row, Schema, Value, View};
 
 fn make_row(id: i64, active: bool) -> Row {
-    Row::new(vec![
+    // Lean scalar row (single allocation, no string formatting) so the
+    // benchmark measures IVM engine throughput, not row construction.
+    Row::from([
         Value::Int(id),
         Value::Bool(active),
         Value::Float(id as f64 * 1.5),
-        Value::Str(format!("row{id}")),
     ])
 }
 
@@ -19,7 +20,7 @@ fn make_row(id: i64, active: bool) -> Row {
 /// view's incremental insert/remove on every push.
 pub fn filter_bench(rows: u32, pushes: u32) -> u32 {
     let rows = rows.max(1) as i64;
-    let schema = Schema::new(&["id", "active", "score", "name"]);
+    let schema = Schema::new(&["id", "active", "score"]);
     let cmp = Comparator::new(&schema, &["id"]);
     let active = schema.index_of("active").unwrap();
 
@@ -47,7 +48,7 @@ pub fn filter_bench(rows: u32, pushes: u32) -> u32 {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn filter_bench_shard(rows: i64, pushes: i64, shards: i64, shard: i64) -> u32 {
-    let schema = Schema::new(&["id", "active", "score", "name"]);
+    let schema = Schema::new(&["id", "active", "score"]);
     let cmp = Comparator::new(&schema, &["id"]);
     let active = schema.index_of("active").unwrap();
 

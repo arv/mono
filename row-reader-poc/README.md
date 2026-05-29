@@ -298,45 +298,50 @@ dataflow core:
 - `View` — the materialized result, maintained incrementally.
 - `Pipeline` — wires source -> operators -> view (`push` + `hydrate`).
 
-`cargo test -p ivm` (7 tests) covers hydration, add / remove, all four edit
-transitions, content edits, and sort-key-changing edits.
+`cargo test -p ivm` (8 tests) covers hydration, add / remove, all four edit
+transitions, content edits, sort-key-changing edits, and sharded == serial.
 
 Deferred (the bulk of the engine): the pull / `fetch` hydration path (lazy
 streams + `yield`), relationships / `child` changes, and the stateful operators
 — `join` / `flipped-join`, `exists`, `take` / `skip`, `fan-in` / `fan-out`, and
 constraints.
 
-### Performance: a naive port loses to V8
+### Performance: a naive port loses to V8; a tuned one wins
 
 `bench:ivm` runs an identical filter-pipeline workload (1000 rows hydrated +
 10,000 membership-flipping edits) as native (napi), wasm, and the JS reference,
-and asserts all three agree on the result. Unlike serialization, the naive
-port **loses**:
+and asserts all three agree on the result. Unlike serialization, a **naive**
+port loses badly — but it's an allocation problem, not a language ceiling.
+Native, per optimization step (10k edits):
 
-| impl           | time/iter |        vs JS |
-| -------------- | --------: | -----------: |
-| js (reference) |   ~1.8 ms |         1.0x |
-| native (napi)  |   ~7.7 ms | ~4.3x slower |
-| wasm           |  ~15.3 ms | ~8.5x slower |
+| step                                                                            |      native |    wasm |
+| ------------------------------------------------------------------------------- | ----------: | ------: |
+| `BTreeMap<String, Value>` rows                                                  |    ~14.8 ms |  ~33 ms |
+| schema-indexed `Rc<[Value]>` positional rows                                    |     ~7.7 ms |  ~15 ms |
+| hash store (no key alloc) + stack `Emit` (no `Vec<Change>`) + lean 1-alloc rows |     ~2.5 ms | ~3.8 ms |
+| `FxHasher` instead of std SipHash                                               |     ~1.9 ms | ~3.0 ms |
+| **JS reference**                                                                | **~2.0 ms** |       — |
 
-(A first cut with `BTreeMap<String, Value>` rows was ~2x worse again — ~15 ms
-native / ~33 ms wasm — because each row allocated column-name `String`s + tree
-nodes. Switching to schema-indexed, `Rc`-shared rows roughly halved it.)
+Each naive choice fed V8's strengths: per-row column-name `String`s + B-tree
+nodes (V8 has none — hidden classes), `Vec` churn (V8's nursery bump-allocates
+short-lived garbage cheaply), and std's DoS-resistant SipHash (V8's `Map` uses a
+fast hash). Removing them — positional `Rc`-shared rows, a `HashSet` keyed by
+the row itself (no per-op key allocation), a stack-allocated `Emit` enum instead
+of `Vec<Change>` per push, single-allocation rows, and `FxHasher` — gets the
+**single-core native engine past V8 (~1.9 vs ~2.0 ms)**.
 
-Why: the workload is dominated by short-lived small-row allocation churn —
-exactly what V8's generational GC + escape analysis excel at (nursery
-bump-allocation, scalar replacement). Rust's per-object `malloc`/`free` can't
-match that, and wasm's allocator is slower still. To beat V8 here the Rust IVM
-needs allocation-conscious design: arenas / row pools, stack-allocated operator
-emits (no `Vec<Change>` per push), and inline sort keys (no `Vec<Value>` per
-index op).
+wasm lands at ~3.0 ms (~1.5x JS) — it doesn't clear the client bar yet. wasm is
+inherently ~1.5x native here (bounds checks, slower allocator), and note
+**`wasm-opt` is disabled** in this build (binaryen download blocked); enabling it
+should close some of that. The client path needs more work (or a different
+structure) before wasm ≥ JS.
 
-**Caveat — this microbenchmark flatters V8.** Small state + high churn is its
-sweet spot. A server's IVM maintains _large, long-lived_ indexes (joins over
-millions of rows), where Rust's compact, GC-free, cache-friendly memory should
-win and V8's GC pauses hurt. That large-state regime is the one to measure
-before drawing server-side conclusions — and it's also where wasm's gap to JS
-should shrink.
+Fairness note: the comparison is now apples-to-apples — both sides keep an
+unordered hash index (Rust `FxHashSet`, JS `Map`) and a lean scalar row, so this
+measures raw change/membership throughput. An _ordered_ view (Zero's actual
+output) would put a B-tree on both sides; a string-heavy row adds formatting
+cost on both (and Rust's `format!` is slower than V8 template literals — a
+separate axis).
 
 ### Parallelism: sharding (the server lever)
 
@@ -348,27 +353,25 @@ by join key, group-bys by group key). `bench:ivm:parallel` does this for the
 filter workload (partition by `id % shards`); every shard count agrees with the
 single-threaded result.
 
-On a 4-core box (50,000 edits):
+On a 4-core box (50,000 edits), with the tuned single-core engine above:
 
-| run               |     time |                 speedup |
+| run               |     time |                   vs JS |
 | ----------------- | -------: | ----------------------: |
-| js (1 thread)     |  ~8.7 ms |                       — |
-| native (1 shard)  | ~36.7 ms |                    1.0x |
-| native (2 shards) | ~19.1 ms |                    1.9x |
-| native (4 shards) | ~10.8 ms |                    3.4x |
-| native (8 shards) | ~14.1 ms | oversubscribed: 4 cores |
+| js (1 thread)     | ~12.5 ms |                       — |
+| native (1 shard)  |  ~8.5 ms |      1.5x (single-core) |
+| native (2 shards) |  ~5.0 ms |                    2.5x |
+| native (4 shards) |  ~3.2 ms |                    3.9x |
+| native (8 shards) |  ~5.9 ms | oversubscribed: 4 cores |
 
-Near-linear scaling to core count. Here 4 shards nearly closes the single-thread
-deficit (10.8 vs 8.7 ms); with more cores it crosses JS. This is the server
-shape: native threads share memory for free, so a server can shard IVM across
-all cores — and run many independent client queries in parallel on top. Node is
-single-threaded per isolate; the equivalent needs workers + serialized hand-off.
+Single-core native already beats JS (1.5x); sharding then scales near-linearly
+to core count (~3.9x at 4 cores). This is the server shape: native threads share
+memory for free, so a server shards IVM across all cores — and runs many
+independent client queries in parallel on top. Node is single-threaded per
+isolate; the equivalent needs workers + serialized hand-off.
 
-Two caveats: (1) sharding multiplies throughput but each shard still carries the
-per-op allocation overhead above — the real win is sharding **and** the
-allocation fixes together; (2) it doesn't help the _client_ (wasm, one main
-thread), which needs the allocation work to clear the JS bar (or the SAB-worker
-approach in `threads-sab.html` for cross-worker parallelism).
+The remaining gap is the _client_ (wasm, one main thread): it can't shard cheaply
+(would need the SAB-worker approach in `threads-sab.html`), and is still ~1.5x JS
+single-threaded — so the client bar (wasm ≥ JS) is the open item.
 
 ## Deviations from the original plan
 

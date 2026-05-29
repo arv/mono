@@ -104,7 +104,9 @@ class View {
 }
 
 function makeRow(id: number, active: boolean): Row {
-  return {id, active, score: id * 1.5, name: `row${id}`};
+  // Lean scalar row (matches the Rust workload): no string column, so the
+  // benchmark measures IVM engine throughput, not row construction.
+  return {id, active, score: id * 1.5};
 }
 
 /** Mirror of `ivm::filter_bench`. Returns the final view size. */

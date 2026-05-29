@@ -61,6 +61,14 @@ impl Row {
     }
 }
 
+/// Build a row from a fixed-size array in a single allocation (no intermediate
+/// `Vec`), for hot paths that construct many rows.
+impl<const N: usize> From<[Value; N]> for Row {
+    fn from(values: [Value; N]) -> Self {
+        Row(Rc::from(values))
+    }
+}
+
 /// Orders rows by a fixed list of sort-column indices (resolved from the schema
 /// once). The key it produces also indexes rows in the source and view, so the
 /// sort columns must uniquely identify a row.
@@ -82,12 +90,24 @@ impl Comparator {
         Comparator { sort: sort.into() }
     }
 
+    /// The sort-column indices (shared, cheap to clone). Used by the store to
+    /// key rows without allocating a separate key per operation.
+    pub fn sort(&self) -> Rc<[usize]> {
+        self.sort.clone()
+    }
+
     /// The sort key of `row`: its values for the sort columns, in order.
     pub fn key(&self, row: &Row) -> Vec<Value> {
         self.sort.iter().map(|&i| row.get(i).clone()).collect()
     }
 
     pub fn compare(&self, a: &Row, b: &Row) -> Ordering {
-        self.key(a).cmp(&self.key(b))
+        for &i in self.sort.iter() {
+            match a.get(i).cmp(b.get(i)) {
+                Ordering::Equal => {}
+                non_eq => return non_eq,
+            }
+        }
+        Ordering::Equal
     }
 }
