@@ -17,6 +17,7 @@
     "bench": "node js/bench.ts",
     "bench:native": "node js/native-bench.ts",
     "bench:ivm": "node js/ivm-bench.ts",
+    "bench:ivm:parallel": "node js/ivm-parallel-bench.ts",
     "bench:rust": "cargo bench",
     "check-types": "tsc --noEmit",
     "dev": "vite"

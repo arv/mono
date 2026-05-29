@@ -20,3 +20,5 @@ pub use ops::{Filter, MemorySource, Operator, Pipeline, View};
 pub use row::{Comparator, Row, Schema};
 pub use value::Value;
 pub use workload::filter_bench;
+#[cfg(not(target_arch = "wasm32"))]
+pub use workload::filter_bench_parallel;

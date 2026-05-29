@@ -29,6 +29,7 @@ row-reader-poc/
     native-bench.ts    # native (napi) vs wasm serialize comparison
     native/            # loads + types the .node addon
     ivm-bench.ts       # IVM pipeline: native vs wasm vs JS reference
+    ivm-parallel-bench.ts # sharded native IVM (N threads) vs single-thread JS
     ivm/reference.ts   # faithful JS IVM baseline (mirror of the ivm crate)
     worker.ts/main.ts  # browser worker smoke test (postMessage transfer)
     threads/           # multi-thread producers -> single consumer
@@ -89,6 +90,7 @@ pnpm run threads:bench     # rows/s vs thread count sweep -> threads-scaling.svg
 pnpm run bench             # JS read vs JSON.parse + WASM serialize throughput
 pnpm run bench:native      # native (napi) vs wasm serialize (needs both builds)
 pnpm run bench:ivm         # IVM pipeline: native vs wasm vs JS (needs both builds)
+pnpm run bench:ivm:parallel # sharded native IVM (N threads) vs single-thread JS
 pnpm run bench:rust        # pure-Rust criterion: binary serialize vs serde_json
 cargo test -p row-core     # serializer unit tests
 
@@ -335,6 +337,38 @@ millions of rows), where Rust's compact, GC-free, cache-friendly memory should
 win and V8's GC pauses hurt. That large-state regime is the one to measure
 before drawing server-side conclusions — and it's also where wasm's gap to JS
 should shrink.
+
+### Parallelism: sharding (the server lever)
+
+A single pipeline's push stream is sequential and stateful, so it **cannot** be
+parallelized — concurrent pushes would race on source/operator/view state and
+reorder dependent changes. The sound form is **key-partitioned sharding**: split
+rows by key into shared-nothing sub-pipelines, one per thread (joins partition
+by join key, group-bys by group key). `bench:ivm:parallel` does this for the
+filter workload (partition by `id % shards`); every shard count agrees with the
+single-threaded result.
+
+On a 4-core box (50,000 edits):
+
+| run               |     time |                 speedup |
+| ----------------- | -------: | ----------------------: |
+| js (1 thread)     |  ~8.7 ms |                       — |
+| native (1 shard)  | ~36.7 ms |                    1.0x |
+| native (2 shards) | ~19.1 ms |                    1.9x |
+| native (4 shards) | ~10.8 ms |                    3.4x |
+| native (8 shards) | ~14.1 ms | oversubscribed: 4 cores |
+
+Near-linear scaling to core count. Here 4 shards nearly closes the single-thread
+deficit (10.8 vs 8.7 ms); with more cores it crosses JS. This is the server
+shape: native threads share memory for free, so a server can shard IVM across
+all cores — and run many independent client queries in parallel on top. Node is
+single-threaded per isolate; the equivalent needs workers + serialized hand-off.
+
+Two caveats: (1) sharding multiplies throughput but each shard still carries the
+per-op allocation overhead above — the real win is sharding **and** the
+allocation fixes together; (2) it doesn't help the _client_ (wasm, one main
+thread), which needs the allocation work to clear the JS bar (or the SAB-worker
+approach in `threads-sab.html` for cross-worker parallelism).
 
 ## Deviations from the original plan
 

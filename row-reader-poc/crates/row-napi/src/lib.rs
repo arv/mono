@@ -54,3 +54,10 @@ impl NativeSchema {
 pub fn ivm_filter_bench(rows: u32, pushes: u32) -> u32 {
     ivm::filter_bench(rows, pushes)
 }
+
+/// Key-partitioned data-parallel IVM workload across `shards` threads (see
+/// `ivm::filter_bench_parallel`). The server-side parallelism story.
+#[napi]
+pub fn ivm_filter_bench_parallel(rows: u32, pushes: u32, shards: u32) -> u32 {
+    ivm::filter_bench_parallel(rows, pushes, shards)
+}
