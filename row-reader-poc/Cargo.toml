@@ -6,6 +6,7 @@ members = [
   "crates/row-wasm",
   "crates/row-napi",
   "crates/ivm",
+  "crates/size-probe",
 ]
 
 # Optimize for small + fast wasm. Profile settings must live in the workspace

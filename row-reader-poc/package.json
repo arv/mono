@@ -19,6 +19,7 @@
     "bench:ivm": "node js/ivm-bench.ts",
     "bench:ivm:parallel": "node js/ivm-parallel-bench.ts",
     "bench:rust": "cargo bench",
+    "size:probe": "cargo build --release --target wasm32-unknown-unknown -p size-probe && wasm-bindgen target/wasm32-unknown-unknown/release/size_probe.wasm --out-dir pkg-min --target web && node -e \"const s=require('node:fs').statSync('pkg-min/size_probe_bg.wasm').size; console.log('serializer-only wasm:', s, 'bytes')\"",
     "check-types": "tsc --noEmit",
     "dev": "vite"
   },

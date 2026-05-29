@@ -8,6 +8,9 @@
 # native addon output (regenerate with `pnpm run build:native`)
 /pkg-native
 
+# size-probe output (regenerate with `pnpm run size:probe`)
+/pkg-min
+
 # JS deps / build
 node_modules
 *.tsbuildinfo

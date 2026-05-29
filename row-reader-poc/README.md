@@ -20,6 +20,7 @@ row-reader-poc/
     row-wasm/          # wasm-bindgen bindings (thin wrapper over row-json)
     row-napi/          # native Node addon (napi-rs, thin wrapper over row-json)
     ivm/               # IVM engine slice (push dataflow: source/filter/view)
+    size-probe/        # minimal serializer-only wasm, to measure the size floor
   js/
     schema.ts          # CompiledSchema (offsets computed once)
     row-reader.ts      # RowReader (DataView-based lazy column reads)
@@ -153,6 +154,30 @@ plan): `JSON.stringify` can't encode `BigInt`, and this sidesteps wasm-bindgen's
 `i64` friction. Rust parses them with `str::parse::<i64>()`. On the read side,
 `RowReader` returns `int64` as a JS `BigInt` (`DataView.getBigInt64`).
 `bytes` columns cross as arrays of `u8`.
+
+## WASM size
+
+The shipped wasm bundles serde_json (the JSON boundary) + the IVM engine +
+wasm-bindgen glue. Measured on this build:
+
+| build                                               |                                raw |          gzip |
+| --------------------------------------------------- | ---------------------------------: | ------------: |
+| current (`row-wasm`, `opt-level=s`, no `wasm-opt`)  |                             148 KB |         65 KB |
+| same, `opt-level=z` + `panic=abort` + `strip`       |                             139 KB |         64 KB |
+| serializer only, typed args (no serde_json, no ivm) | **~19 KB** (`s`), **~17 KB** (`z`) | ~9 KB / ~8 KB |
+
+**serde_json is ~128 KB of the bundle.** The single biggest lever is dropping
+the JSON boundary and passing typed/columnar values across instead — which also
+makes serialization faster, and which the native path doesn't need at all.
+`opt-level=z`/`panic=abort` barely move the full build because serde_json
+dominates. The `size-probe` crate measures the serializer-only floor
+(`pnpm run size:probe`).
+
+Below ~17 KB, the serialization _logic_ is <1 KB — the rest is the allocator
+(dlmalloc, ~6–10 KB) + wasm-bindgen glue + std remnants. Stripping those
+(`no_std` + a tiny bump allocator, a hand-written wasm ABI instead of
+wasm-bindgen, and `wasm-opt -Oz` — disabled here, ~15–30% more) puts a minimal
+serializer in the **~5–8 KB raw / ~3–4 KB gzip** range.
 
 ## Native Node addon (napi, tsgo-style)
 
