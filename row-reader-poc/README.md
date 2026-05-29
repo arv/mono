@@ -19,6 +19,7 @@ row-reader-poc/
     row-json/          # shared JSON decode + serialize (used by both bindings)
     row-wasm/          # wasm-bindgen bindings (thin wrapper over row-json)
     row-napi/          # native Node addon (napi-rs, thin wrapper over row-json)
+    ivm/               # IVM engine slice (push dataflow: source/filter/view)
   js/
     schema.ts          # CompiledSchema (offsets computed once)
     row-reader.ts      # RowReader (DataView-based lazy column reads)
@@ -275,6 +276,30 @@ True shared-_linear-memory_ wasm threads (one wasm module across all threads,
 e.g. via `wasm-bindgen-rayon`) compile here too; the blocker is the per-thread
 stack/TLS bootstrap glue, clean in a cross-origin-isolated browser but fiddly to
 verify headlessly.
+
+## IVM engine (Rust port — first slice)
+
+`crates/ivm` begins porting the incremental view maintenance engine from
+`packages/zql/src/ivm` (~7k non-test lines). This first slice is the push-based
+dataflow core:
+
+- `value` / `row` / `change` — the data model (`Value` with a total order so
+  rows key a `BTreeMap`; `Row`; `Change` = add / remove / edit).
+- `MemorySource` — sorted storage at the head of a pipeline; a key-changing
+  edit splits into remove + add (the row moves position).
+- `Filter` — predicate filter with zql's edit-splitting: an edit becomes an
+  add, a remove, a pass-through edit, or nothing, depending on which sides
+  match.
+- `View` — the materialized result, maintained incrementally.
+- `Pipeline` — wires source -> operators -> view (`push` + `hydrate`).
+
+`cargo test -p ivm` (7 tests) covers hydration, add / remove, all four edit
+transitions, content edits, and sort-key-changing edits.
+
+Deferred (the bulk of the engine): the pull / `fetch` hydration path (lazy
+streams + `yield`), relationships / `child` changes, and the stateful operators
+— `join` / `flipped-join`, `exists`, `take` / `skip`, `fan-in` / `fan-out`, and
+constraints.
 
 ## Deviations from the original plan
 

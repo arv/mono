@@ -5,6 +5,7 @@ members = [
   "crates/row-json",
   "crates/row-wasm",
   "crates/row-napi",
+  "crates/ivm",
 ]
 
 # Optimize for small + fast wasm. Profile settings must live in the workspace
