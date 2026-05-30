@@ -40,9 +40,77 @@ import {WriteImplBase, deleteSentinel} from './write-impl-base.ts';
  * Strict serializable transactions are provided by an `RWLock` on the main
  * thread (multiple concurrent readers or a single writer), exactly like
  * {@link MemStore}; the worker processes the resulting messages one at a time.
+ *
+ * Read-through cache: the cross-thread round-trip (not the payload copy) is what
+ * bounds point reads, so a bounded LRU value cache is kept on the main thread.
+ * A `get`/`has` hit is served without touching the worker at all (zero
+ * round-trips); a successful `commit` updates the cache from the just-written
+ * batch so it stays warm. This is safe because the write lock excludes readers
+ * during a commit, and in Replicache's usage values are content-addressed
+ * (immutable per key). The cache size is configurable; 0 disables it entirely.
  */
 
 const FILE_PREFIX = 'rep-opfs-';
+
+/** Default number of values kept in the main-thread read-through cache. */
+const DEFAULT_CACHE_SIZE = 1000;
+
+/** Options for {@link OPFSStore}. */
+export type OPFSStoreOptions = {
+  /**
+   * Maximum number of values to keep in the main-thread read-through LRU cache.
+   * Hits are served without a worker round-trip. Set to 0 to disable caching
+   * (every `get` goes to the worker). Defaults to {@link DEFAULT_CACHE_SIZE}.
+   */
+  cacheSize?: number | undefined;
+};
+
+// A deleted/absent key is cached as this sentinel so negative lookups (has ===
+// false, get === undefined) also avoid a worker round-trip.
+const ABSENT = Symbol('absent');
+type Cached = FrozenJSONValue | typeof ABSENT;
+
+/**
+ * Tiny bounded LRU over a Map (insertion-ordered). Recency is maintained by
+ * delete+set on access; eviction drops the oldest entry. A `size` of 0 makes
+ * every operation a no-op.
+ */
+class LRU {
+  readonly #max: number;
+  readonly #map = new Map<string, Cached>();
+
+  constructor(max: number) {
+    this.#max = max;
+  }
+
+  get(key: string): Cached | undefined {
+    if (this.#max === 0) {
+      return undefined;
+    }
+    const v = this.#map.get(key);
+    if (v !== undefined) {
+      // Touch: move to most-recently-used.
+      this.#map.delete(key);
+      this.#map.set(key, v);
+    }
+    return v;
+  }
+
+  set(key: string, value: Cached): void {
+    if (this.#max === 0) {
+      return;
+    }
+    this.#map.delete(key);
+    this.#map.set(key, value);
+    if (this.#map.size > this.#max) {
+      // Evict least-recently-used (first key in insertion order).
+      const oldest = this.#map.keys().next().value;
+      if (oldest !== undefined) {
+        this.#map.delete(oldest);
+      }
+    }
+  }
+}
 
 // Log record format (little-endian):
 //   tag:uint8 (0=put, 1=del) | keyLen:uint32 | valLen:uint32 | key | value
@@ -320,12 +388,14 @@ class WorkerClient {
 export class OPFSStore implements Store {
   readonly #name: string;
   readonly #rwLock = new RWLock();
+  readonly #cache: LRU;
   #client: WorkerClient | null = null;
   #openPromise: Promise<WorkerClient> | null = null;
   #closed = false;
 
-  constructor(name: string) {
+  constructor(name: string, options?: OPFSStoreOptions) {
     this.#name = name;
+    this.#cache = new LRU(options?.cacheSize ?? DEFAULT_CACHE_SIZE);
   }
 
   #open(): Promise<WorkerClient> {
@@ -346,14 +416,14 @@ export class OPFSStore implements Store {
     throwIfStoreClosed(this);
     const client = await this.#open();
     const release = await this.#rwLock.read();
-    return new ReadImpl(client, release);
+    return new ReadImpl(client, this.#cache, release);
   }
 
   async write(): Promise<Write> {
     throwIfStoreClosed(this);
     const client = await this.#open();
     const release = await this.#rwLock.write();
-    return new WriteImpl(client, release);
+    return new WriteImpl(client, this.#cache, release);
   }
 
   async close(): Promise<void> {
@@ -377,11 +447,13 @@ export class OPFSStore implements Store {
 
 class ReadImpl implements Read {
   readonly #client: WorkerClient;
+  readonly #cache: LRU;
   readonly #release: () => void;
   #closed = false;
 
-  constructor(client: WorkerClient, release: () => void) {
+  constructor(client: WorkerClient, cache: LRU, release: () => void) {
     this.#client = client;
+    this.#cache = cache;
     this.#release = release;
   }
 
@@ -395,7 +467,17 @@ class ReadImpl implements Read {
   }
 
   has(key: string): Promise<boolean> {
-    return maybeTransactionIsClosedRejection(this) ?? this.#client.has(key);
+    const rejection = maybeTransactionIsClosedRejection(this);
+    if (rejection) {
+      return rejection;
+    }
+    const cached = this.#cache.get(key);
+    if (cached !== undefined) {
+      return Promise.resolve(cached !== ABSENT);
+    }
+    // On a miss, use the worker's cheap index-only `has` rather than fetching
+    // (and caching) the whole value, which a caller of `has` does not want.
+    return this.#client.has(key);
   }
 
   async get(key: string): Promise<FrozenJSONValue | undefined> {
@@ -403,20 +485,31 @@ class ReadImpl implements Read {
     if (rejection) {
       return rejection;
     }
+    const cached = this.#cache.get(key);
+    if (cached !== undefined) {
+      return cached === ABSENT ? undefined : cached;
+    }
     const {found, buffer} = await this.#client.get(key);
     if (!found || buffer === null) {
+      this.#cache.set(key, ABSENT);
       return undefined;
     }
-    return deepFreeze(JSON.parse(textDecoder.decode(new Uint8Array(buffer))));
+    const value = deepFreeze(
+      JSON.parse(textDecoder.decode(new Uint8Array(buffer))),
+    );
+    this.#cache.set(key, value);
+    return value;
   }
 }
 
 class WriteImpl extends WriteImplBase implements Write {
   readonly #client: WorkerClient;
+  readonly #cache: LRU;
 
-  constructor(client: WorkerClient, release: () => void) {
-    super(new ReadImpl(client, release));
+  constructor(client: WorkerClient, cache: LRU, release: () => void) {
+    super(new ReadImpl(client, cache, release));
     this.#client = client;
+    this.#cache = cache;
   }
 
   async commit(): Promise<void> {
@@ -428,6 +521,11 @@ class WriteImpl extends WriteImplBase implements Write {
     }
     const buffer = encodeBatch(this._pending);
     await this.#client.commit(buffer);
+    // Worker write succeeded and we still hold the write lock, so the cache can
+    // be brought forward from the just-committed batch without racing readers.
+    for (const [key, value] of this._pending) {
+      this.#cache.set(key, value === deleteSentinel ? ABSENT : value);
+    }
     this._pending.clear();
     return undefined;
   }

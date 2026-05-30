@@ -47,8 +47,15 @@ const factories: Factory[] = [
       }),
   },
   {
-    label: 'OPFSStore',
-    create: name => new OPFSStore(name),
+    // Cache disabled: every get is a worker round-trip (isolates raw I/O+RPC).
+    label: 'OPFS(no cache)',
+    create: name => new OPFSStore(name, {cacheSize: 0}),
+    drop: dropOPFSStore,
+  },
+  {
+    // Read-through cache large enough to hold the whole working set.
+    label: 'OPFS(cached)',
+    create: name => new OPFSStore(name, {cacheSize: 100_000}),
     drop: dropOPFSStore,
   },
 ];
