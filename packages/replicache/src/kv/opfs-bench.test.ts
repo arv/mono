@@ -67,6 +67,22 @@ function opsPerSec(ops: number, ms: number): string {
   return Math.round((ops / ms) * 1000).toLocaleString();
 }
 
+// Render rows (array of same-keyed records) as a fixed-width text table.
+function formatTable(rows: Record<string, string>[]): string[] {
+  const cols = Object.keys(rows[0]);
+  const widths = cols.map(c =>
+    Math.max(c.length, ...rows.map(r => r[c].length)),
+  );
+  const pad = (s: string, w: number) => s + ' '.repeat(w - s.length);
+  const sep = '| ' + widths.map(w => '-'.repeat(w)).join(' | ') + ' |';
+  const header =
+    '| ' + cols.map((c, i) => pad(c, widths[i])).join(' | ') + ' |';
+  const body = rows.map(
+    r => '| ' + cols.map((c, i) => pad(r[c], widths[i])).join(' | ') + ' |',
+  );
+  return [header, sep, ...body];
+}
+
 async function benchStore(
   f: Factory,
   cfg: {n: number; perCommit: number; valueSize: number; reads: number},
@@ -145,20 +161,24 @@ test.runIf(ENABLED)(
       {n: 5000, perCommit: 1000, valueSize: 1024, reads: 2000},
     ];
 
+    const lines: string[] = [];
     for (const cfg of configs) {
       const rows: Record<string, string>[] = [];
-      // Warm up the engines (open files / dbs) before measuring.
       for (const f of factories) {
         rows.push(await benchStore(f, cfg));
       }
-      // eslint-disable-next-line no-console
-      console.log(
-        `\n=== n=${cfg.n}, value≈${cfg.valueSize}B, ` +
+      lines.push(
+        `=== n=${cfg.n}, value≈${cfg.valueSize}B, ` +
           `perCommit=${cfg.perCommit}, randReads=${cfg.reads} ===`,
       );
-      // eslint-disable-next-line no-console
-      console.table(rows);
+      lines.push(...formatTable(rows));
+      lines.push('');
     }
+    // Single console.log with markers so the numbers are easy to extract from
+    // the browser-forwarded test output. Run with `--silent=false` to surface
+    // it (the shared browser config sets `silent: 'passed-only'`).
+    // eslint-disable-next-line no-console
+    console.log('__OPFS_BENCH__\n' + lines.join('\n') + '\n__OPFS_BENCH_END__');
   },
   120_000,
 );
