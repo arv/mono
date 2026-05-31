@@ -48,6 +48,38 @@ import {WriteImplBase, deleteSentinel} from './write-impl-base.ts';
  * batch so it stays warm. This is safe because the write lock excludes readers
  * during a commit, and in Replicache's usage values are content-addressed
  * (immutable per key). The cache size is configurable; 0 disables it entirely.
+ *
+ * Multiple tabs: an exclusive sync access handle would let only the first tab
+ * open a given store (every other tab's open throws `NoModificationAllowedError`
+ * — verified on Chromium 141). To support concurrent tabs, each tab instead
+ * opens its **own** handle in `readwrite-unsafe` mode; such handles to the same
+ * file see each other's flushed writes (also verified). Coordination is then:
+ *
+ * - A cross-tab read/write lock via the **Web Locks API** (`navigator.locks`):
+ *   reads take it `shared`, commits and compaction take it `exclusive`. This is
+ *   the cross-tab analog of the in-process {@link RWLock} and, crucially,
+ *   excludes readers during a compaction (the one operation that moves existing
+ *   value offsets). Web Locks auto-release if a tab crashes, so a dead tab can't
+ *   wedge the others.
+ * - A **`BroadcastChannel`** announces which keys each commit changed; other
+ *   tabs evict exactly those keys from their LRU and mark their worker index
+ *   stale.
+ * - Before a read (when stale) and before every commit, the worker **resyncs**:
+ *   it folds any bytes appended by other tabs into its index, or fully re-scans
+ *   if the file shrank (another tab compacted).
+ *
+ * Set `multiTab: false` to skip all of this (single-handle, no Web Lock / no
+ * BroadcastChannel) when the store is known to be owned by one tab.
+ *
+ * Consistency note: writes are strictly serialized across tabs by the exclusive
+ * Web Lock, and within a tab the worker always resyncs before reading, so a tab
+ * never reads a torn or stale value *from disk*. The main-thread LRU, however,
+ * is invalidated via an asynchronous `BroadcastChannel` message that is not
+ * ordered against the lock handoff, so cross-tab *cache* coherence is eventual:
+ * for a brief window after another tab commits, a cached read here may return
+ * the previous value. This matches Replicache's existing model (it polls/render
+ * on its own cadence and values are immutable per key); set `cacheSize: 0` if a
+ * store needs strict cross-tab read-after-write on every get.
  */
 
 const FILE_PREFIX = 'rep-opfs-';
@@ -63,6 +95,15 @@ export type OPFSStoreOptions = {
    * (every `get` goes to the worker). Defaults to {@link DEFAULT_CACHE_SIZE}.
    */
   cacheSize?: number | undefined;
+
+  /**
+   * Coordinate concurrent access from multiple tabs (Web Locks +
+   * BroadcastChannel + `readwrite-unsafe` handle). Defaults to `true`. Set to
+   * `false` for a lighter single-owner store that opens an exclusive handle and
+   * skips cross-tab coordination; a second tab opening the same store will then
+   * fail to open.
+   */
+  multiTab?: boolean | undefined;
 };
 
 // A deleted/absent key is cached as this sentinel so negative lookups (has ===
@@ -109,6 +150,16 @@ class LRU {
         this.#map.delete(oldest);
       }
     }
+  }
+
+  // Drop a key entirely (used when another tab reports it changed). The next
+  // read then misses and re-fetches the authoritative value from the worker.
+  invalidate(key: string): void {
+    this.#map.delete(key);
+  }
+
+  clear(): void {
+    this.#map.clear();
   }
 }
 
@@ -174,8 +225,9 @@ const dec = new TextDecoder();
 
 let handle = null;
 const index = new Map(); // key -> {offset, length}
-let fileSize = 0;
+let fileSize = 0;     // bytes of the file this worker has folded into its index
 let liveBytes = 0;
+let multiTab = false; // when false, this worker is the sole writer: skip resync
 
 // Scan a buffer of log records and fold it into the index. Offsets in the index
 // are absolute file offsets, so records are placed at base + their position.
@@ -203,6 +255,29 @@ function foldBuffer(buf, base) {
   }
 }
 
+// Bring this worker's index up to date with whatever other tabs have written to
+// the shared file since we last looked. Cheap when nothing changed (one
+// getSize). If the file grew, fold only the appended tail; if it shrank, another
+// tab compacted, so re-scan from scratch.
+function resync() {
+  if (!multiTab) return; // sole writer: our index is already authoritative
+  const actual = handle.getSize();
+  if (actual === fileSize) return;
+  if (actual < fileSize) {
+    // File was compacted/truncated by another tab: rebuild the whole index.
+    index.clear();
+    liveBytes = 0;
+    fileSize = 0;
+  }
+  if (actual > fileSize) {
+    const tail = new Uint8Array(actual - fileSize);
+    const read = handle.read(tail, {at: fileSize});
+    if (read !== tail.length) throw new Error('short read during resync');
+    foldBuffer(tail, fileSize);
+    fileSize = actual;
+  }
+}
+
 function get(key) {
   const entry = index.get(key);
   if (entry === undefined) return null;
@@ -214,6 +289,9 @@ function get(key) {
 
 function commit(buf) {
   if (buf.length === 0) return;
+  // Append at the true end of file, not our cached fileSize, so we never
+  // clobber bytes another tab appended since our last resync.
+  resync();
   const base = fileSize;
   const written = handle.write(buf, {at: base});
   if (written !== buf.length) throw new Error('short write while committing');
@@ -272,7 +350,12 @@ self.onmessage = async e => {
     if (op === 'open') {
       const root = await navigator.storage.getDirectory();
       const fh = await root.getFileHandle(e.data.fileName, {create: true});
-      handle = await fh.createSyncAccessHandle();
+      multiTab = !!e.data.multiTab;
+      // multiTab => readwrite-unsafe so each tab can hold its own handle; such
+      // handles to the same file see each other's flushed writes.
+      handle = multiTab
+        ? await fh.createSyncAccessHandle({mode: 'readwrite-unsafe'})
+        : await fh.createSyncAccessHandle();
       fileSize = handle.getSize();
       if (fileSize > 0) {
         const all = new Uint8Array(fileSize);
@@ -280,9 +363,13 @@ self.onmessage = async e => {
         if (read !== fileSize) throw new Error('short read while scanning');
         foldBuffer(all, 0);
       }
+    } else if (op === 'resync') {
+      resync();
     } else if (op === 'has') {
+      resync();
       result = index.has(e.data.key);
     } else if (op === 'get') {
+      resync();
       const bytes = get(e.data.key);
       if (bytes === null) {
         result = {found: false, buffer: null};
@@ -316,6 +403,29 @@ function getWorkerURL(): string {
 }
 
 type GetResult = {found: boolean; buffer: ArrayBuffer | null};
+
+/**
+ * Bridge the Web Locks API (callback-scoped) to our acquire/release model. The
+ * lock is held for as long as the callback's promise is unresolved, so we
+ * resolve the acquire promise with a release function that settles it.
+ */
+function acquireWebLock(
+  name: string,
+  mode: 'shared' | 'exclusive',
+): Promise<() => void> {
+  const {promise: acquired, resolve, reject} = resolver<() => void>();
+  navigator.locks
+    .request(name, {mode}, () => {
+      const {promise: held, resolve: release} = resolver<void>();
+      resolve(release);
+      return held; // hold the lock until release() is called
+    })
+    .catch(reject); // if the request itself fails, fail the acquire
+  return acquired;
+}
+
+// BroadcastChannel message: keys whose values a commit in another tab changed.
+type ChangeMessage = {keys: string[]};
 
 /** Thin promise-based RPC wrapper around the OPFS worker. */
 class WorkerClient {
@@ -362,8 +472,8 @@ class WorkerClient {
     return promise;
   }
 
-  open(name: string): Promise<void> {
-    return this.#call('open', {fileName: fileName(name)});
+  open(name: string, multiTab: boolean): Promise<void> {
+    return this.#call('open', {fileName: fileName(name), multiTab});
   }
 
   has(key: string): Promise<boolean> {
@@ -387,8 +497,14 @@ class WorkerClient {
 
 export class OPFSStore implements Store {
   readonly #name: string;
+  readonly #multiTab: boolean;
+  // Same-tab serialization. In multi-tab mode the cross-tab Web Lock provides
+  // the real mutual exclusion; this still guards the per-tab worker/cache.
   readonly #rwLock = new RWLock();
   readonly #cache: LRU;
+  // Cross-tab coordination (multi-tab mode only).
+  readonly #lockName: string | undefined;
+  readonly #channel: BroadcastChannel | undefined;
   #client: WorkerClient | null = null;
   #openPromise: Promise<WorkerClient> | null = null;
   #closed = false;
@@ -396,6 +512,18 @@ export class OPFSStore implements Store {
   constructor(name: string, options?: OPFSStoreOptions) {
     this.#name = name;
     this.#cache = new LRU(options?.cacheSize ?? DEFAULT_CACHE_SIZE);
+    this.#multiTab = options?.multiTab ?? true;
+    if (this.#multiTab) {
+      this.#lockName = 'rep-opfs-lock-' + name;
+      this.#channel = new BroadcastChannel('rep-opfs-chan-' + name);
+      // Another tab committed: drop exactly those keys so our next read
+      // re-fetches the authoritative value (and our worker resyncs the tail).
+      this.#channel.onmessage = (e: MessageEvent<ChangeMessage>) => {
+        for (const key of e.data.keys) {
+          this.#cache.invalidate(key);
+        }
+      };
+    }
   }
 
   #open(): Promise<WorkerClient> {
@@ -404,7 +532,7 @@ export class OPFSStore implements Store {
     }
     if (!this.#openPromise) {
       const client = new WorkerClient();
-      this.#openPromise = client.open(this.#name).then(() => {
+      this.#openPromise = client.open(this.#name, this.#multiTab).then(() => {
         this.#client = client;
         return client;
       });
@@ -412,18 +540,37 @@ export class OPFSStore implements Store {
     return this.#openPromise;
   }
 
+  // Acquire the cross-tab Web Lock (no-op in single-tab mode). Returns a release
+  // callback; in single-tab mode it is a no-op.
+  #acquireCrossTab(mode: 'shared' | 'exclusive'): Promise<() => void> {
+    if (this.#lockName === undefined) {
+      return Promise.resolve(() => {});
+    }
+    return acquireWebLock(this.#lockName, mode);
+  }
+
   async read(): Promise<Read> {
     throwIfStoreClosed(this);
     const client = await this.#open();
-    const release = await this.#rwLock.read();
+    const crossTab = await this.#acquireCrossTab('shared');
+    const local = await this.#rwLock.read();
+    const release = () => {
+      local();
+      crossTab();
+    };
     return new ReadImpl(client, this.#cache, release);
   }
 
   async write(): Promise<Write> {
     throwIfStoreClosed(this);
     const client = await this.#open();
-    const release = await this.#rwLock.write();
-    return new WriteImpl(client, this.#cache, release);
+    const crossTab = await this.#acquireCrossTab('exclusive');
+    const local = await this.#rwLock.write();
+    const release = () => {
+      local();
+      crossTab();
+    };
+    return new WriteImpl(client, this.#cache, release, this.#channel);
   }
 
   async close(): Promise<void> {
@@ -437,6 +584,7 @@ export class OPFSStore implements Store {
         release();
       }
     }
+    this.#channel?.close();
     this.#closed = true;
   }
 
@@ -505,11 +653,18 @@ class ReadImpl implements Read {
 class WriteImpl extends WriteImplBase implements Write {
   readonly #client: WorkerClient;
   readonly #cache: LRU;
+  readonly #channel: BroadcastChannel | undefined;
 
-  constructor(client: WorkerClient, cache: LRU, release: () => void) {
+  constructor(
+    client: WorkerClient,
+    cache: LRU,
+    release: () => void,
+    channel: BroadcastChannel | undefined,
+  ) {
     super(new ReadImpl(client, cache, release));
     this.#client = client;
     this.#cache = cache;
+    this.#channel = channel;
   }
 
   async commit(): Promise<void> {
@@ -519,6 +674,7 @@ class WriteImpl extends WriteImplBase implements Write {
     if (this._pending.size === 0) {
       return promiseVoid;
     }
+    const changedKeys = [...this._pending.keys()];
     const buffer = encodeBatch(this._pending);
     await this.#client.commit(buffer);
     // Worker write succeeded and we still hold the write lock, so the cache can
@@ -527,6 +683,8 @@ class WriteImpl extends WriteImplBase implements Write {
       this.#cache.set(key, value === deleteSentinel ? ABSENT : value);
     }
     this._pending.clear();
+    // Tell other tabs which keys changed so they drop them from their caches.
+    this.#channel?.postMessage({keys: changedKeys} satisfies ChangeMessage);
     return undefined;
   }
 
