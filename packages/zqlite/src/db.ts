@@ -178,11 +178,25 @@ export class Database implements Disposable {
 
 export class Statement {
   readonly #stmt: SQLite3Statement;
-  readonly #lc: LogContext;
   readonly #threshold: number;
-  readonly #attrs: Attributes;
   readonly scanStatus: SQLite3Statement['scanStatusV2'];
   readonly scanStatusReset: SQLite3Statement['scanStatusReset'];
+
+  // Per-method LogContext and attrs are constant for the lifetime of a
+  // Statement, so precompute them once instead of calling `withContext`
+  // (which allocates) and spreading `attrs` on every run/get/all/iterate
+  // call. Statements are pooled and reused across many fetches on the hot
+  // hydration path, so this removes a large amount of per-call allocation.
+  readonly #runLc: LogContext;
+  readonly #getLc: LogContext;
+  readonly #allLc: LogContext;
+  readonly #runAttrs: Attributes;
+  readonly #getAttrs: Attributes;
+  readonly #allAttrs: Attributes;
+  readonly #iterateTotalLc: LogContext;
+  readonly #iterateSqliteLc: LogContext;
+  readonly #iterateTotalAttrs: Attributes;
+  readonly #iterateSqliteAttrs: Attributes;
 
   constructor(
     lc: LogContext,
@@ -190,12 +204,24 @@ export class Statement {
     stmt: SQLite3Statement,
     threshold: number,
   ) {
-    this.#lc = lc.withContext('class', 'Statement');
-    this.#attrs = attrs;
+    const baseLc = lc.withContext('class', 'Statement');
     this.#stmt = stmt;
     this.#threshold = threshold;
     this.scanStatus = this.#stmt.scanStatusV2.bind(this.#stmt);
     this.scanStatusReset = this.#stmt.scanStatusReset.bind(this.#stmt);
+
+    this.#runLc = baseLc.withContext('method', 'run');
+    this.#getLc = baseLc.withContext('method', 'get');
+    this.#allLc = baseLc.withContext('method', 'all');
+    this.#runAttrs = {...attrs, method: 'run'};
+    this.#getAttrs = {...attrs, method: 'get'};
+    this.#allAttrs = {...attrs, method: 'all'};
+
+    const iterateLc = baseLc.withContext('method', 'iterate');
+    this.#iterateTotalLc = iterateLc.withContext('type', 'total');
+    this.#iterateSqliteLc = iterateLc.withContext('type', 'sqlite');
+    this.#iterateTotalAttrs = {...attrs, type: 'total', method: 'iterate'};
+    this.#iterateSqliteAttrs = {...attrs, type: 'sqlite', method: 'iterate'};
   }
 
   safeIntegers(useBigInt: boolean): this {
@@ -207,9 +233,9 @@ export class Statement {
     const start = performance.now();
     const ret = this.#stmt.run(...params);
     logIfSlow(
-      this.#lc.withContext('method', 'run'),
+      this.#runLc,
       performance.now() - start,
-      {...this.#attrs, method: 'run'},
+      this.#runAttrs,
       this.#threshold,
     );
     return ret;
@@ -219,9 +245,9 @@ export class Statement {
     const start = performance.now();
     const ret = this.#stmt.get(...params);
     logIfSlow(
-      this.#lc.withContext('method', 'get'),
+      this.#getLc,
       performance.now() - start,
-      {...this.#attrs, method: 'get'},
+      this.#getAttrs,
       this.#threshold,
     );
     return ret as T;
@@ -231,9 +257,9 @@ export class Statement {
     const start = performance.now();
     const ret = this.#stmt.all(...params);
     logIfSlow(
-      this.#lc.withContext('method', 'all'),
+      this.#allLc,
       performance.now() - start,
-      {...this.#attrs, method: 'all'},
+      this.#allAttrs,
       this.#threshold,
     );
     return ret as T[];
@@ -241,8 +267,10 @@ export class Statement {
 
   iterate<T>(...params: unknown[]): IterableIterator<T> {
     return new LoggingIterableIterator(
-      this.#lc.withContext('method', 'iterate'),
-      this.#attrs,
+      this.#iterateTotalLc,
+      this.#iterateSqliteLc,
+      this.#iterateTotalAttrs,
+      this.#iterateSqliteAttrs,
       this.#stmt.iterate(...params),
       this.#threshold,
     ) as IterableIterator<T>;
@@ -250,21 +278,27 @@ export class Statement {
 }
 
 class LoggingIterableIterator<T> implements IterableIterator<T> {
-  readonly #lc: LogContext;
+  readonly #totalLc: LogContext;
+  readonly #sqliteLc: LogContext;
   readonly #it: IterableIterator<T>;
   readonly #threshold: number;
-  readonly #attrs: Attributes;
+  readonly #totalAttrs: Attributes;
+  readonly #sqliteAttrs: Attributes;
   #start: number;
   #sqliteRowTimeSum: number;
 
   constructor(
-    lc: LogContext,
-    attrs: Attributes,
+    totalLc: LogContext,
+    sqliteLc: LogContext,
+    totalAttrs: Attributes,
+    sqliteAttrs: Attributes,
     it: IterableIterator<T>,
     slowQueryThreshold: number,
   ) {
-    this.#lc = lc;
-    this.#attrs = attrs;
+    this.#totalLc = totalLc;
+    this.#sqliteLc = sqliteLc;
+    this.#totalAttrs = totalAttrs;
+    this.#sqliteAttrs = sqliteAttrs;
     this.#it = it;
     this.#start = performance.now();
     this.#threshold = slowQueryThreshold;
@@ -284,15 +318,15 @@ class LoggingIterableIterator<T> implements IterableIterator<T> {
 
   #log() {
     logIfSlow(
-      this.#lc.withContext('type', 'total'),
+      this.#totalLc,
       performance.now() - this.#start,
-      {...this.#attrs, type: 'total', method: 'iterate'},
+      this.#totalAttrs,
       this.#threshold,
     );
     logIfSlow(
-      this.#lc.withContext('type', 'sqlite'),
+      this.#sqliteLc,
       this.#sqliteRowTimeSum,
-      {...this.#attrs, type: 'sqlite', method: 'iterate'},
+      this.#sqliteAttrs,
       this.#threshold,
     );
   }
