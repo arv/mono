@@ -104,7 +104,14 @@ async function makeDatabases<TSchema extends Schema>(
   // Test data must be in client format
   testData?: (serverSchema: ServerSchema) => Record<string, Row[]>,
 ): Promise<DBs<TSchema>> {
-  const pg = await testDBs.create(suiteName, {typeOpts: false});
+  const pg = await testDBs.create(suiteName, {
+    typeOpts: false,
+    // The benchmark/test data lives entirely in shared_buffers, so the
+    // spinning-disk default (random_page_cost=4) makes the planner avoid index
+    // scans it should use. 1.1 is the standard value for SSD/in-memory data and
+    // reflects how Postgres is actually deployed.
+    connectionParams: {random_page_cost: '1.1'},
+  });
   await pg.unsafe(pgContent);
 
   const serverSchema = await pg.begin(tx =>
@@ -133,6 +140,14 @@ async function makeDatabases<TSchema extends Schema>(
       }
     });
   }
+
+  // Collect planner statistics after the bulk data load. A bulk COPY/insert
+  // does not trigger autovacuum's ANALYZE synchronously, so without this the
+  // queries run against a database with no statistics and the planner makes
+  // poor choices (e.g. wildly wrong row estimates that push it away from index
+  // scans). Real systems ANALYZE after a bulk load; doing the same here is both
+  // correct and representative.
+  await pg.unsafe('ANALYZE');
 
   tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zero-integration-tests'));
   const tempFile = path.join(tempDir, `${suiteName}.db`);

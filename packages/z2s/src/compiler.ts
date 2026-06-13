@@ -683,11 +683,26 @@ function getServerColumn(spec: ServerSpec, table: Table, zqlColumn: string) {
   ];
 }
 
+// Matches a run of 16+ consecutive ASCII digits. Any integer literal with at
+// most 15 digits is at most 999_999_999_999_999 (< 2^53), so it is always
+// within Number's safe-integer range; only a 16+ digit run *might* exceed it.
+const MAYBE_UNSAFE_INTEGER = /\d{16,}/;
+
 // oxlint-disable-next-line @typescript-eslint/no-explicit-any
 export function extractZqlResult(pgResult: Array<any>): JSONValue {
-  const bigIntJson: BigIntJSONValue = parseBigIntJson(
-    pgResult[0][ZQL_RESULT_KEY],
-  );
+  const text = pgResult[0][ZQL_RESULT_KEY];
+  // Fast path: when the JSON text contains no run of 16+ consecutive digits,
+  // every integer literal is provably within Number's safe range, so there can
+  // be no out-of-range integer to detect. Native JSON.parse then produces an
+  // identical result to the bigint-aware parser but is dramatically faster
+  // (a C++ parser vs a pure-JS parser invoking a JS callback per number) and
+  // allocates far less. Only when a long digit run exists (which might exceed
+  // the safe range, whether in a number or inside a string) do we fall back to
+  // the precise parser that detects and reports it.
+  if (typeof text === 'string' && !MAYBE_UNSAFE_INTEGER.test(text)) {
+    return JSON.parse(text) as JSONValue;
+  }
+  const bigIntJson: BigIntJSONValue = parseBigIntJson(text);
   assertJSONValue(bigIntJson);
   return bigIntJson;
 }
