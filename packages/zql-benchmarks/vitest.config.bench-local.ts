@@ -16,6 +16,9 @@ export default mergeConfig(benchConfig, {
   test: {
     name: 'zql-benchmarks/bench-local',
     globalSetup: ['./test/pg-local.ts'],
+    // Some backends (e.g. zqlite "all playlists") are slow enough per iter that
+    // mitata's min_samples * iter-time exceeds the default 60s test timeout.
+    testTimeout: 600_000,
     browser: {
       enabled: false,
     },

@@ -39,6 +39,9 @@ export type OnNoticeFn = (n: postgres.Notice) => void;
 export type TestDBOptions = {
   onNotice?: OnNoticeFn;
   typeOpts?: TypeOptions | false;
+  // Extra Postgres connection/startup parameters (GUCs) applied to every
+  // connection in the created pool, e.g. {random_page_cost: '1.1'}.
+  connectionParams?: Record<string, string>;
 };
 
 const IGNORE_LEVELS = new Set(['DEBUG', 'INFO', 'NOTICE']);
@@ -64,7 +67,7 @@ export class TestDBs {
     database: string,
     opts: TestDBOptions = {},
   ): Promise<PostgresDB & AsyncDisposable> {
-    const {onNotice, typeOpts = {}} = opts;
+    const {onNotice, typeOpts = {}, connectionParams} = opts;
     const exists = this.#dbs[database];
     if (exists !== undefined) {
       console.warn('dropping database', database);
@@ -90,7 +93,7 @@ export class TestDBs {
       // of the server's timezone setting. This is sent as a startup parameter
       // to every connection in the pool (unlike SET TIME ZONE which only
       // affects a single connection).
-      connection: {TimeZone: 'UTC'},
+      connection: {TimeZone: 'UTC', ...connectionParams},
       ...(typeOpts ? postgresTypeConfig(typeOpts) : {}),
     });
     this.#dbs[database] = db;
