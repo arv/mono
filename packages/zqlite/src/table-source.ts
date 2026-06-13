@@ -40,7 +40,10 @@ import type {Stream} from '../../zql/src/ivm/stream.ts';
 import {assertOrderingIncludesPK} from '../../zql/src/query/complete-ordering.ts';
 import type {Database, Statement} from './db.ts';
 import {compile, format, sql} from './internal/sql.ts';
-import {StatementCache} from './internal/statement-cache.ts';
+import {
+  StatementCache,
+  normalizeWhitespace,
+} from './internal/statement-cache.ts';
 import {
   buildSelectQuery,
   toSQLiteType,
@@ -75,6 +78,13 @@ let eventCount = 0;
 export class TableSource implements Source {
   readonly #dbCache = new WeakMap<Database, Statements>();
   readonly #connections: Connection[] = [];
+  // Per-connection cache of already-normalized SQL text, keyed by fetch shape
+  // (constraint columns + reverse). The Join calls fetch once per parent row
+  // with the same shape but different constraint *values*, so the SQL text is
+  // identical across those calls — building/formatting/normalizing it every
+  // time is pure overhead. Only the bind values (the constraint values) need
+  // to be recomputed per fetch.
+  readonly #sqlTextCache = new WeakMap<Connection, Map<string, string>>();
   readonly #table: string;
   readonly #columns: Record<string, SchemaValue>;
   // Maps sorted columns JSON string (e.g. '["a","b"]) to Set of columns.
@@ -283,10 +293,9 @@ export class TableSource implements Source {
   *#fetch(req: FetchRequest, connection: Connection): Stream<Node | 'yield'> {
     const {sort, debug} = connection;
 
-    const query = this.#requestToSQL(req, connection.filters?.condition, sort);
-    const sqlAndBindings = format(query);
+    const sqlAndBindings = this.#resolveSqlAndBindings(req, connection, sort);
 
-    const cachedStatement = this.#stmts.cache.get(sqlAndBindings.text);
+    const cachedStatement = this.#stmts.cache.getPrepared(sqlAndBindings.text);
     cachedStatement.statement.safeIntegers(true);
     const rowIterator = cachedStatement.statement.iterate<Row>(
       ...sqlAndBindings.values,
@@ -529,6 +538,57 @@ export class TableSource implements Source {
       return fromSQLiteTypes(this.#columns, row, this.#table);
     }
     return row;
+  }
+
+  /**
+   * Produces the (whitespace-normalized) SQL text and bind values for a fetch.
+   *
+   * For the common shape — a plain equality constraint (or none), no `start`,
+   * no `multiConstraints`, and no connection filters — the SQL text depends
+   * only on the constraint columns and `reverse`, not the constraint values.
+   * That text is cached per connection so repeated same-shape fetches (the
+   * Join's per-parent child lookups) skip buildSelectQuery + format +
+   * normalizeWhitespace entirely; only the constraint values are rebound. The
+   * value list reproduces exactly what `format` would emit: constraintsToSQL
+   * iterates `Object.entries(constraint)` and binds `toSQLiteType(value)` for
+   * each, in that order, and nothing else in this shape contributes bindings.
+   */
+  #resolveSqlAndBindings(
+    req: FetchRequest,
+    connection: Connection,
+    sort: Ordering | undefined,
+  ): {text: string; values: readonly unknown[]} {
+    const filters = connection.filters?.condition;
+    const hasMulti =
+      req.multiConstraints !== undefined &&
+      req.multiConstraints.some(mc => mc.length > 0);
+    if (req.start === undefined && filters === undefined && !hasMulti) {
+      let connCache = this.#sqlTextCache.get(connection);
+      if (connCache === undefined) {
+        connCache = new Map();
+        this.#sqlTextCache.set(connection, connCache);
+      }
+      const constraint = req.constraint;
+      const keys = constraint ? Object.keys(constraint) : [];
+      const shapeKey = (req.reverse ? 'r:' : 'f:') + keys.join(',');
+      let text = connCache.get(shapeKey);
+      if (text === undefined) {
+        text = normalizeWhitespace(
+          format(this.#requestToSQL(req, undefined, sort)).text,
+        );
+        connCache.set(shapeKey, text);
+      }
+      const values: unknown[] = [];
+      if (constraint) {
+        for (const key of keys) {
+          values.push(toSQLiteType(constraint[key], this.#columns[key].type));
+        }
+      }
+      return {text, values};
+    }
+
+    const {text, values} = format(this.#requestToSQL(req, filters, sort));
+    return {text: normalizeWhitespace(text), values};
   }
 
   #requestToSQL(
