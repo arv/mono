@@ -122,15 +122,25 @@ export function expandChange(change: Change): CaughtChange {
 }
 
 export function expandNode(node: Node | 'yield'): CaughtNode {
-  return node === 'yield'
-    ? node
-    : {
-        row: node.row,
-        relationships: Object.fromEntries(
-          Object.entries(node.relationships).map(([k, v]) => [
-            k,
-            Array.from(v(), expandNode),
-          ]),
-        ),
-      };
+  if (node === 'yield') {
+    return node;
+  }
+  // Build the relationships object with a direct loop instead of
+  // Object.entries(...).map(...) → Object.fromEntries(...). That chain
+  // allocates an intermediate entries array, a mapped pairs array, and walks
+  // the iterator protocol twice; the direct loop produces the identical result
+  // with a single pass and no intermediates. This is on the hot path for every
+  // materialized pipeline (Catch is the standard way tests and benchmarks drain
+  // an Input), so the allocation churn is worth avoiding.
+  const src = node.relationships;
+  const relationships: Record<string, CaughtNode[]> = {};
+  for (const k in src) {
+    const stream = src[k]();
+    const children: CaughtNode[] = [];
+    for (const child of stream) {
+      children.push(expandNode(child));
+    }
+    relationships[k] = children;
+  }
+  return {row: node.row, relationships};
 }
