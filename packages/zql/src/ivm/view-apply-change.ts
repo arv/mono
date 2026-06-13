@@ -655,34 +655,55 @@ function initializeRelationshipsForNewEntryIfAny(
         );
       }
     } else {
-      // Plural non-hidden: build array in-place for efficiency
+      // Plural non-hidden: build array in-place for efficiency.
       const childArray: MutableMetaEntryList = track([]);
+      const {compareRows} = childSchema;
 
       for (const childNode of getChildNodes(node, relationship)) {
-        const newEntry = makeNewMetaEntry(
-          childNode.row,
-          childSchema,
-          withIDs,
-          1,
-        );
-        const rawPos = binarySearch(
-          childArray,
-          childNode.row,
-          childSchema.compareRows,
-        );
-
-        if (rawPos >= 0) {
-          childArray[rawPos][refCountSymbol]++;
-        } else {
-          childArray.splice(~rawPos, 0, newEntry);
-          initializeRelationshipsForNewEntryIfAny(
-            newEntry,
-            childNode,
-            childSchema,
-            childFormat.relationships,
-            withIDs,
-          );
+        const row = childNode.row;
+        const len = childArray.length;
+        // Fast path: during hydration children arrive in `compareRows` order,
+        // so the incoming row is normally >= the last one already appended.
+        // Compare against the tail to append (or bump refCount on an exact
+        // duplicate) in O(1) instead of paying an O(log n) binary search plus
+        // a splice per child, and to skip allocating an entry we would throw
+        // away on a duplicate. Fall back to the general insert only when a row
+        // arrives out of order.
+        if (len > 0) {
+          const cmp = compareRows(childArray[len - 1] as Row, row);
+          if (cmp === 0) {
+            childArray[len - 1][refCountSymbol]++;
+            continue;
+          }
+          if (cmp > 0) {
+            const newEntry = makeNewMetaEntry(row, childSchema, withIDs, 1);
+            const rawPos = binarySearch(childArray, row, compareRows);
+            if (rawPos >= 0) {
+              childArray[rawPos][refCountSymbol]++;
+            } else {
+              childArray.splice(~rawPos, 0, newEntry);
+              initializeRelationshipsForNewEntryIfAny(
+                newEntry,
+                childNode,
+                childSchema,
+                childFormat.relationships,
+                withIDs,
+              );
+            }
+            continue;
+          }
         }
+
+        // Append: first element, or a new maximum (the common case).
+        const newEntry = makeNewMetaEntry(row, childSchema, withIDs, 1);
+        childArray.push(newEntry);
+        initializeRelationshipsForNewEntryIfAny(
+          newEntry,
+          childNode,
+          childSchema,
+          childFormat.relationships,
+          withIDs,
+        );
       }
 
       result[relationship] = childArray;
