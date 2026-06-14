@@ -1,4 +1,3 @@
-/* oxlint-disable no-console */
 // Vitest globalSetup that points the PG-backed benchmarks/tests at an
 // already-running local PostgreSQL cluster (configured with
 // wal_level=logical), instead of spinning up a testcontainer. Used in
