@@ -82,7 +82,16 @@ export class StatementCache {
    * @returns
    */
   get(sql: string): CachedStatement {
-    sql = normalizeWhitespace(sql);
+    return this.getPrepared(normalizeWhitespace(sql));
+  }
+
+  /**
+   * Like {@link get}, but assumes `sql` has already been normalized via
+   * {@link normalizeWhitespace}. Callers on the hot path that cache their own
+   * (already-normalized) SQL text use this to avoid re-running the whitespace
+   * normalization regex on every fetch.
+   */
+  getPrepared(sql: string): CachedStatement {
     const statements = this.#cache.get(sql);
     if (statements && statements.length > 0) {
       const statement = statements.pop()!;
@@ -126,6 +135,6 @@ export class StatementCache {
   }
 }
 
-function normalizeWhitespace(sql: string) {
+export function normalizeWhitespace(sql: string) {
   return sql.replaceAll(/\s+/g, ' ');
 }
