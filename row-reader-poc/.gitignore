@@ -1,0 +1,20 @@
+# Rust build output
+/target
+
+# wasm-pack output (regenerate with `npm run build:wasm`)
+/pkg-node
+/pkg-web
+
+# native addon output (regenerate with `pnpm run build:native`)
+/pkg-native
+
+# size-probe output (regenerate with `pnpm run size:probe`)
+/pkg-min
+
+# JS deps / build
+node_modules
+*.tsbuildinfo
+dist
+
+# benchmark output
+threads-scaling.svg

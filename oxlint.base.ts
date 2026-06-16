@@ -27,6 +27,9 @@ export const baseConfig = {
     'prod/sst/sst-env.d.ts',
     '**/um.js',
     '**/__snapshots__/**',
+    // Standalone Rust/WASM POC with its own tsconfig and build; not part of
+    // the npm workspaces.
+    'row-reader-poc/',
   ],
   rules: {
     // Disable unsafe optional chaining - many legitimate patterns in codebase

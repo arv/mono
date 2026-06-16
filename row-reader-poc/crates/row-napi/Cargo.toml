@@ -1,0 +1,17 @@
+[package]
+name = "row-napi"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "2", default-features = false, features = ["napi8"] }
+napi-derive = "2"
+row-json = { path = "../row-json" }
+ivm = { path = "../ivm" }
+
+[build-dependencies]
+napi-build = "2"

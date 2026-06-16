@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Row Reader POC — thread scaling</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        margin: 24px;
+      }
+      table {
+        border-collapse: collapse;
+        margin-top: 16px;
+      }
+      td,
+      th {
+        border: 1px solid #ccc;
+        padding: 4px 12px;
+        text-align: right;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Row Reader POC — thread scaling</h1>
+    <p>
+      N Web Workers each serialize rows in wasm and transfer them to the main
+      thread. The chart plots throughput (rows/s) as a function of worker count.
+    </p>
+    <p id="status">starting…</p>
+    <canvas id="chart" width="760" height="440"></canvas>
+    <table>
+      <thead>
+        <tr>
+          <th>threads</th>
+          <th>rows/s</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <script type="module" src="./js/threads/browser.main.ts"></script>
+  </body>
+</html>
