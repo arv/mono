@@ -6,6 +6,7 @@ import type {
   SimpleCondition,
 } from '../../zero-protocol/src/ast.ts';
 import type {SchemaValue} from '../../zero-schema/src/table-schema.ts';
+import {createPredicate} from '../../zql/src/builder/filter.ts';
 import {Database} from './db.ts';
 import {format} from './internal/sql.ts';
 import {
@@ -136,44 +137,44 @@ test('non-nullable cursor columns use range and equality operators without IS NU
   `);
 });
 
-test('json path filters: type gate, negation, empty NOT IN and key escaping', () => {
-  const ref = (...path: (string | number)[]): JsonPathReference => ({
-    type: 'json',
-    value: {type: 'column', name: 'metadata'},
-    path,
-  });
-  const cond = (
-    op: SimpleCondition['op'],
-    left: JsonPathReference,
-    value: LiteralValue,
-  ): NoSubqueryCondition => ({
-    type: 'simple',
-    op,
-    left,
-    right: {type: 'literal', value},
-  });
+const ref = (...path: (string | number)[]): JsonPathReference => ({
+  type: 'json',
+  value: {type: 'column', name: 'metadata'},
+  path,
+});
+const cond = (
+  op: SimpleCondition['op'],
+  left: JsonPathReference,
+  value: LiteralValue,
+): NoSubqueryCondition => ({
+  type: 'simple',
+  op,
+  left,
+  right: {type: 'literal', value},
+});
 
+test('json path filters: type gate, negation, empty NOT IN and key escaping', () => {
   // A positive comparison gates the extraction on json_type(), so a leaf of
   // another JSON type is NULL (a non-match): `true` never equals `1`.
   expect(format(filtersToSQL(cond('=', ref('flagged'), true))))
     .toMatchInlineSnapshot(`
-    {
-      "text": "(CASE WHEN json_type("metadata", ?) IN (?, ?) THEN json_extract("metadata", ?) END) = ?",
-      "values": [
-        "$."flagged"",
-        "true",
-        "false",
-        "$."flagged"",
-        1,
-      ],
-    }
-  `);
+      {
+        "text": "(CASE WHEN json_type((CASE WHEN json_valid("metadata") THEN "metadata" END), ?) IN (?, ?) THEN json_extract((CASE WHEN json_valid("metadata") THEN "metadata" END), ?) END) = ?",
+        "values": [
+          "$."flagged"",
+          "true",
+          "false",
+          "$."flagged"",
+          1,
+        ],
+      }
+    `);
   // A negated comparison must instead *match* a mismatched leaf and still
   // exclude a null/missing one.
   expect(format(filtersToSQL(cond('!=', ref('priority'), 'high'))))
     .toMatchInlineSnapshot(`
       {
-        "text": "(CASE COALESCE(json_type("metadata", ?), 'null') WHEN 'null' THEN 0 WHEN ? THEN json_extract("metadata", ?) != ? ELSE 1 END)",
+        "text": "(CASE COALESCE(json_type((CASE WHEN json_valid("metadata") THEN "metadata" END), ?), 'null') WHEN 'null' THEN 0 WHEN ? THEN json_extract((CASE WHEN json_valid("metadata") THEN "metadata" END), ?) != ? ELSE 1 END)",
         "values": [
           "$."priority"",
           "text",
@@ -186,27 +187,27 @@ test('json path filters: type gate, negation, empty NOT IN and key escaping', ()
   // match NULL).
   expect(format(filtersToSQL(cond('NOT IN', ref('priority'), []))))
     .toMatchInlineSnapshot(`
-    {
-      "text": "json_extract("metadata", ?) IS NOT NULL",
-      "values": [
-        "$."priority"",
-      ],
-    }
-  `);
+      {
+        "text": "json_extract((CASE WHEN json_valid("metadata") THEN "metadata" END), ?) IS NOT NULL",
+        "values": [
+          "$."priority"",
+        ],
+      }
+    `);
   // Keys are JSON-escaped in the path (SQLite reads quoted labels with JSON
   // escapes; SQL-style `""` doubling is not understood).
   expect(format(filtersToSQL(cond('ILIKE', ref('a"b', 'c\\d', 0), 'x%'))))
     .toMatchInlineSnapshot(`
-    {
-      "text": "lower((CASE WHEN json_type("metadata", ?) IN (?) THEN json_extract("metadata", ?) END)) LIKE lower(?) ESCAPE '\\'",
-      "values": [
-        "$."a\\"b"."c\\\\d"[0]",
-        "text",
-        "$."a\\"b"."c\\\\d"[0]",
-        "x%",
-      ],
-    }
-  `);
+      {
+        "text": "lower((CASE WHEN json_type((CASE WHEN json_valid("metadata") THEN "metadata" END), ?) IN (?) THEN json_extract((CASE WHEN json_valid("metadata") THEN "metadata" END), ?) END)) LIKE lower(?) ESCAPE '\\'",
+        "values": [
+          "$."a\\"b"."c\\\\d"[0]",
+          "text",
+          "$."a\\"b"."c\\\\d"[0]",
+          "x%",
+        ],
+      }
+    `);
   // The LIKE family compares text: the gate is on a string leaf whatever the
   // literal's type and the pattern is bound as text, so `LIKE 3` cannot match
   // a numeric leaf through SQLite's `3 LIKE 3` coercion (the predicate treats
@@ -214,7 +215,7 @@ test('json path filters: type gate, negation, empty NOT IN and key escaping', ()
   expect(format(filtersToSQL(cond('LIKE', ref('count'), 3))))
     .toMatchInlineSnapshot(`
       {
-        "text": "(CASE WHEN json_type("metadata", ?) IN (?) THEN json_extract("metadata", ?) END) LIKE ? ESCAPE '\\'",
+        "text": "(CASE WHEN json_type((CASE WHEN json_valid("metadata") THEN "metadata" END), ?) IN (?) THEN json_extract((CASE WHEN json_valid("metadata") THEN "metadata" END), ?) END) LIKE ? ESCAPE '\\'",
         "values": [
           "$."count"",
           "text",
@@ -226,7 +227,7 @@ test('json path filters: type gate, negation, empty NOT IN and key escaping', ()
   expect(format(filtersToSQL(cond('NOT LIKE', ref('count'), 3))))
     .toMatchInlineSnapshot(`
       {
-        "text": "(CASE COALESCE(json_type("metadata", ?), 'null') WHEN 'null' THEN 0 WHEN ? THEN json_extract("metadata", ?) NOT LIKE ? ESCAPE '\\' ELSE 1 END)",
+        "text": "(CASE COALESCE(json_type((CASE WHEN json_valid("metadata") THEN "metadata" END), ?), 'null') WHEN 'null' THEN 0 WHEN ? THEN json_extract((CASE WHEN json_valid("metadata") THEN "metadata" END), ?) NOT LIKE ? ESCAPE '\\' ELSE 1 END)",
         "values": [
           "$."count"",
           "text",
@@ -240,7 +241,7 @@ test('json path filters: type gate, negation, empty NOT IN and key escaping', ()
   expect(format(filtersToSQL(cond('IS', ref('priority'), null))))
     .toMatchInlineSnapshot(`
       {
-        "text": "json_extract("metadata", ?) IS NULL",
+        "text": "json_extract((CASE WHEN json_valid("metadata") THEN "metadata" END), ?) IS NULL",
         "values": [
           "$."priority"",
         ],
@@ -255,6 +256,132 @@ test('json path filters: type gate, negation, empty NOT IN and key escaping', ()
         "values": [],
       }
     `);
+});
+
+test('json path filters: the SQLite pushdown agrees with the in-memory predicate', () => {
+  // zero-cache hydrates with this SQL but filters pushed rows with
+  // createPredicate, so any disagreement leaves rows stale in a view. Rows hold
+  // raw JSON text as the replica does (e.g. `3.0` and big integers keep their
+  // digits).
+  const rows: [string, string][] = [
+    ['int3', '{"v":3}'],
+    ['real3', '{"v":3.0}'],
+    ['real35', '{"v":3.5}'],
+    ['str3', '{"v":"3"}'],
+    ['str35', '{"v":"3.5"}'],
+    ['strTrue', '{"v":"true"}'],
+    ['strX', '{"v":"x"}'],
+    ['true', '{"v":true}'],
+    ['null', '{"v":null}'],
+    ['missing', '{}'],
+    ['obj', '{"v":{"a":1}}'],
+    ['strObj', '{"v":"{\\"a\\":1}"}'],
+    ['arr', '{"v":["a"]}'],
+    ['strArr', '{"v":"[\\"a\\"]"}'],
+    ['big', '{"v":9007199254740993}'],
+    ['snowflake', '{"v":1234567890123456789}'],
+    ['scalar', '"x"'],
+    ['notJSON', 'not json'],
+  ];
+  const db = new Database(createSilentLogContext(), ':memory:');
+  db.exec(`CREATE TABLE t (id TEXT PRIMARY KEY, metadata TEXT)`);
+  const insert = db.prepare(`INSERT INTO t VALUES (?, ?)`);
+  for (const [id, json] of rows) {
+    insert.run(id, json);
+  }
+  const parse = (json: string) => {
+    try {
+      return JSON.parse(json);
+    } catch {
+      return json;
+    }
+  };
+
+  // Values a static parameter can bind to after wire validation.
+  const obj = {a: 1} as unknown as LiteralValue;
+  const cases: [SimpleCondition['op'], LiteralValue][] = [
+    // The LIKE family matches text: a number or boolean pattern is matched by
+    // its string form against string leaves only.
+    ['LIKE', 3],
+    ['LIKE', 3.5],
+    ['LIKE', true],
+    ['NOT LIKE', 3],
+    ['NOT LIKE', 3.5],
+    ['ILIKE', true],
+    ['NOT ILIKE', false],
+    ['LIKE', '3%'],
+    // Numbers compare as doubles, as JSON.parse reads them.
+    ['=', 3],
+    ['=', 9007199254740992],
+    ['>', 9007199254740992],
+    ['!=', 9007199254740992],
+    ['=', 1234567890123456800],
+    ['IN', [1234567890123456800, 3]],
+    ['NOT IN', [1234567890123456800]],
+    // A literal no leaf can share is a non-match for a positive operator and
+    // a match for a negated one.
+    ['=', obj],
+    ['!=', obj],
+    ['IS', obj],
+    ['IS NOT', obj],
+    ['IN', [obj] as unknown as LiteralValue],
+    ['NOT IN', [obj] as unknown as LiteralValue],
+    ['=', ['a']],
+    ['!=', ['a']],
+    ['NOT IN', []],
+    ['IN', []],
+    ['=', 'x'],
+    ['IS', null],
+    ['IS NOT', null],
+  ];
+  for (const [op, value] of cases) {
+    const condition: SimpleCondition = {
+      type: 'simple',
+      op,
+      left: ref('v'),
+      right: {type: 'literal', value},
+    };
+    const query = format(filtersToSQL(condition));
+    const sqlite = (
+      db
+        .prepare(`SELECT id FROM t WHERE ${query.text} ORDER BY id`)
+        .all(...query.values) as {id: string}[]
+    ).map(r => r.id);
+    const predicate = createPredicate(condition);
+    const inMemory = rows
+      .filter(([id, json]) => predicate({id, metadata: parse(json)}))
+      .map(([id]) => id)
+      .sort();
+    expect({op, value, ids: sqlite}).toEqual({op, value, ids: inMemory});
+  }
+
+  // A value that is not valid JSON text — including JSON nested deeper than
+  // SQLite's parser allows, which Postgres and JavaScript accept — reads as
+  // null rather than failing the whole query.
+  insert.run('deep', `{"v":"x","d":${'['.repeat(1500)}${']'.repeat(1500)}}`);
+  const query = format(filtersToSQL(cond('!=', ref('v'), 'y')));
+  expect(
+    (
+      db
+        .prepare(`SELECT id FROM t WHERE ${query.text} ORDER BY id`)
+        .all(...query.values) as {id: string}[]
+    ).map(r => r.id),
+  ).not.toContain('deep');
+});
+
+test('an empty NOT IN list never matches NULL', () => {
+  // SQL's `NULL NOT IN ()` is TRUE; the in-memory predicate never matches a
+  // null against a value operator.
+  expect(
+    format(
+      filtersToSQL({
+        type: 'simple',
+        op: 'NOT IN',
+        left: {type: 'column', name: 'owner'},
+        right: {type: 'literal', value: []},
+      }),
+    ),
+  ).toEqual({text: `"owner" IS NOT NULL`, values: []});
 });
 
 test('optional cursor columns keep IS equality for tie-break groups; a non-null range bound needs no NULL guard', () => {

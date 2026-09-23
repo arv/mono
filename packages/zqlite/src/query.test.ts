@@ -236,7 +236,7 @@ test('json path filter', async () => {
 });
 
 test('json path: negative or fractional array index throws at build time', () => {
-  // The engines disagree on negative indices (Postgres `#>>` counts from the
+  // The engines disagree on negative indices (Postgres counts from the
   // end; JS/SQLite yield null), so the builder rejects them up front. `as
   // number` sidesteps the compile-time check for a literal to exercise the
   // runtime one.
