@@ -141,6 +141,7 @@ const schemaWithTypedJson = table('testWithTypedJson')
     }>(),
     scores: json<Record<number, number>>(),
     untyped: json(),
+    variant: json<{kind: 'a'; x: number} | {kind: 'b'; y: string}>(),
   })
   .primaryKey('id');
 
@@ -1014,6 +1015,20 @@ test('json path: path segment validation (Tier 2)', () => {
     cmp(json('scores', 2024), '>', 0);
     // @ts-expect-error - the leaf is a number, not a string
     cmp(json('scores', '2024'), '=', 'x');
+
+    // A key of any member of a union is valid (it is null on the others).
+    cmp(json('variant', 'kind'), '=', 'a');
+    cmp(json('variant', 'x'), '=', 1);
+    cmp(json('variant', 'y'), '=', 'z');
+    // @ts-expect-error - 'nope' is not a key of any member
+    cmp(json('variant', 'nope'), '=', 'x');
+
+    // An object or array leaf can't be compared, but can be tested for
+    // presence.
+    cmp(json('metadata', 'tags'), 'IS', null);
+    cmp(json('metadata', 'nested'), 'IS NOT', null);
+    // @ts-expect-error - an array leaf is not comparable
+    cmp(json('metadata', 'tags'), '=', null);
 
     // untyped json() allows any segment
     return cmp(json('untyped', 'anything', 0, 'deep'), '=', 'x');

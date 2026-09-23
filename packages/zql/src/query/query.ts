@@ -189,7 +189,8 @@ export type GetFilterTypeFromTSType<
  * arrays, and deep object/array equality is out of scope — so a non-scalar leaf
  * (an object, an array) resolves to `never`, making the `cmp` call a type error
  * rather than a query that is always-false on the client and rejected by the
- * server. An untyped leaf (`ReadonlyJSONValue`) narrows to its scalar members.
+ * server; such a leaf can still be tested for presence with `IS`/`IS NOT`
+ * `null`. An untyped leaf (`ReadonlyJSONValue`) narrows to its scalar members.
  *
  * An `IN`/`NOT IN` list must be homogeneous: the engines compare the leaf
  * against the type of the list's first element, so a mixed list would drop
@@ -199,7 +200,9 @@ export type GetFilterTypeFromTSType<
 export type GetJsonLeafFilterType<TS, TOperator extends SimpleOperator> = [
   Extract<TS, string | number | boolean>,
 ] extends [never]
-  ? never
+  ? TOperator extends 'IS' | 'IS NOT'
+    ? null
+    : never
   : TOperator extends 'IN' | 'NOT IN'
     ? HomogeneousList<Extract<TS, string | number | boolean>>
     : GetFilterTypeFromTSType<
@@ -305,13 +308,18 @@ type JsonKeysOf<T> =
   NonNullable<ReadonlyJSONValue> extends NonNullable<T>
     ? // untyped `json()` (`ReadonlyJSONValue`) / `any` — allow any segment
       string | number
-    : NonNullable<T> extends readonly unknown[]
-      ? number
-      : NonNullable<T> extends object
-        ?
-            | Extract<keyof NonNullable<T>, string>
-            | `${Extract<keyof NonNullable<T>, number>}`
-        : never;
+    : JsonMemberKeysOf<NonNullable<T>>;
+
+/**
+ * {@link JsonKeysOf} for a typed value, distributed over the members of a
+ * union so that a key of any one member is valid (e.g. a variant's key in a
+ * discriminated union; the path is null on the other members).
+ */
+type JsonMemberKeysOf<T> = T extends readonly unknown[]
+  ? number
+  : T extends object
+    ? Extract<keyof T, string> | `${Extract<keyof T, number>}`
+    : never;
 
 /**
  * `true` for a numeric literal segment that cannot be an array index: negative
