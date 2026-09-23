@@ -9,8 +9,10 @@ import {hasOwn} from '../../shared/src/has-own.ts';
 import {type JSONValue} from '../../shared/src/json.ts';
 import {must} from '../../shared/src/must.ts';
 import {
-  isLikeOperator,
   isNegatedOperator,
+  isValidJsonPathIndex,
+  jsonComparisonLiteral,
+  jsonLeafType,
   jsonLiteralType,
   type AST,
   type Bound,
@@ -438,11 +440,31 @@ export function simple(
   table: Table,
 ): SQLQuery {
   if (condition.left.type === 'json') {
-    const special = jsonPathCondition(spec, condition.left, condition, table);
-    if (special) {
-      return special;
-    }
+    // Compare against the literal the JSON path rules prescribe (a LIKE
+    // pattern as text; see jsonComparisonLiteral).
+    const jsonCondition: SimpleCondition =
+      condition.right.type === 'literal'
+        ? {
+            ...condition,
+            right: {
+              type: 'literal',
+              value: jsonComparisonLiteral(condition.op, condition.right.value),
+            },
+          }
+        : condition;
+    return (
+      jsonPathCondition(spec, condition.left, jsonCondition, table) ??
+      simpleComparison(spec, jsonCondition, table)
+    );
   }
+  return simpleComparison(spec, condition, table);
+}
+
+function simpleComparison(
+  spec: Spec,
+  condition: SimpleCondition,
+  table: Table,
+): SQLQuery {
   switch (condition.op) {
     case '!=':
     case '<':
@@ -481,9 +503,28 @@ export function any(
   condition: SimpleCondition,
   table: Table,
 ): SQLQuery {
+  const left = valueComparison(
+    spec,
+    condition.left,
+    table,
+    condition.right,
+    false,
+  );
+  const {right} = condition;
+  if (
+    condition.op === 'NOT IN' &&
+    right.type === 'literal' &&
+    Array.isArray(right.value) &&
+    right.value.length === 0
+  ) {
+    // SQL's `NOT (x = ANY('{}'))` is TRUE even for a NULL x, but a null never
+    // matches a value operator (see createPredicate): an empty NOT IN matches
+    // exactly the non-null values.
+    return sql`${left} IS NOT NULL`;
+  }
   return sql`${condition.op === 'NOT IN' ? sql`NOT` : sql``}
     (
-      ${valueComparison(spec, condition.left, table, condition.right, false)} = ANY 
+      ${left} = ANY 
       (${valueComparison(spec, condition.right, table, condition.left, true)})
     )`;
 }
@@ -659,21 +700,20 @@ function literalValueComparison(
 }
 
 /**
- * The two SQL pieces every JSON path comparison is built from: the leaf's text
- * (`raw`, SQL NULL for a missing key or a JSON null) and its JSON type
- * (`jsonType`, via `jsonb_typeof`).
+ * The three SQL pieces every JSON path comparison is built from: the leaf as
+ * jsonb (`value`), its text (`raw`, SQL NULL for a missing key or a JSON null)
+ * and its JSON type (`jsonType`, via `jsonb_typeof`).
  *
- * Navigation chains `->` with a *typed* operand per segment — a text operand
- * for an object key, an integer operand for an array index — so Postgres
- * applies the same strict rule as the in-memory reader and SQLite: a string
- * segment never indexes an array and a number never reads an object key. (A
- * `#>>` text[] path would instead resolve a digit string by the container's
- * runtime type, including `'-1'` from the end.) The last step uses `->>` for
- * the text form.
+ * Navigation is strict, as in the in-memory reader and SQLite: an object key is
+ * a `->` step with a text operand, which is NULL on anything but an object, and
+ * an array index is a strict jsonpath subscript ({@link jsonIndex}), which is
+ * NULL on anything but an array. (A `#>>` text[] path would instead resolve a
+ * digit string by the container's runtime type, including `'-1'` from the end.)
+ * A key leaf uses `->>` for the text form.
  *
  * The base is the column as jsonb: a `json` column is cast, and a Postgres
- * array column — which zero maps to a `json()` column and the replica stores
- * as JSON text — is converted with `to_jsonb`.
+ * array column — which zero maps to a `json()` column — is converted with its
+ * elements as Zero represents them ({@link arrayAsJsonb}).
  */
 function jsonPathParts(
   spec: Spec,
@@ -681,34 +721,92 @@ function jsonPathParts(
   table: Table,
 ): {value: SQLQuery; raw: SQLQuery; jsonType: SQLQuery} {
   const {name} = ref.value;
+  const {path} = ref;
+  assert(path.length > 0, 'Expected a non-empty JSON path');
   const col = colIdent(spec.server, {table, zql: name});
-  const {type, isArray} = getServerColumn(spec.server, table, name);
+  const {type, isArray, isEnum} = getServerColumn(spec.server, table, name);
   assert(
     isArray || type === 'json' || type === 'jsonb',
     () => `JSON path on non-JSON column "${name}" of type ${type}`,
   );
   let obj: SQLQuery = isArray
-    ? sql`to_jsonb(${col})`
+    ? arrayAsJsonb(col, type, isEnum)
     : type === 'json'
       ? sql`${col}::jsonb`
       : col;
-  const operand = (seg: string | number): SQLQuery =>
-    typeof seg === 'number'
-      ? // A validated non-negative int32 (see isValidJsonPathIndex), so it is
-        // safe to inline; `->` needs an integer operand to index an array.
-        sql.__dangerous__rawValue(String(seg))
-      : sqlConvertSingularLiteralArg(seg);
-  const last = ref.path.length - 1;
+  const last = path.length - 1;
   for (let i = 0; i < last; i++) {
-    obj = sql`(${obj} -> ${operand(ref.path[i])})`;
+    const seg = path[i];
+    obj =
+      typeof seg === 'number'
+        ? jsonIndex(obj, seg)
+        : sql`(${obj} -> ${sqlConvertSingularLiteralArg(seg)})`;
   }
-  const leaf = operand(ref.path[last]);
+  const leaf = path[last];
+  if (typeof leaf === 'number') {
+    const value = jsonIndex(obj, leaf);
+    return {
+      value,
+      raw: sql`(${value} #>> '{}')`,
+      jsonType: sql`jsonb_typeof(${value})`,
+    };
+  }
+  const key = sqlConvertSingularLiteralArg(leaf);
   return {
-    // The leaf as jsonb; `raw` is its text form.
-    value: sql`(${obj} -> ${leaf})`,
-    raw: sql`(${obj} ->> ${leaf})`,
-    jsonType: sql`jsonb_typeof(${obj} -> ${leaf})`,
+    value: sql`(${obj} -> ${key})`,
+    raw: sql`(${obj} ->> ${key})`,
+    jsonType: sql`jsonb_typeof(${obj} -> ${key})`,
   };
+}
+
+/**
+ * Element `index` of the jsonb `obj`, or NULL when `obj` is not an array: `->`
+ * with an integer would read a raw scalar as a one-element array
+ * (`'"a"'::jsonb -> 0` is `"a"`), breaking the strict-segment rule, while a
+ * strict jsonpath subscript matches array elements only.
+ */
+function jsonIndex(obj: SQLQuery, index: number): SQLQuery {
+  // A validated non-negative int32, so it is safe to inline.
+  assert(isValidJsonPathIndex(index), () => `Invalid JSON path index ${index}`);
+  return sql`jsonb_path_query_first(${obj}, ${sql.__dangerous__rawValue(
+    `'strict $[${index}]'`,
+  )}, '{}', true)`;
+}
+
+/**
+ * A native Postgres array column as jsonb, with its elements as Zero represents
+ * them (the replica's values and what `selectIdent` reads): a temporal element
+ * is epoch milliseconds, which `to_jsonb` would render as an ISO string instead.
+ */
+function arrayAsJsonb(
+  col: SQLQuery,
+  elementType: string,
+  isEnum: boolean,
+): SQLQuery {
+  const ms = isEnum ? undefined : temporalAsEpochMs(elementType, sql`el`);
+  return ms === undefined
+    ? sql`to_jsonb(${col})`
+    : sql`to_jsonb(ARRAY(SELECT ${ms} FROM unnest(${col}) WITH ORDINALITY AS u(el, ord) ORDER BY ord))`;
+}
+
+/**
+ * The epoch-milliseconds form of a temporal value `el` of Postgres type `type`,
+ * or `undefined` for a non-temporal type.
+ */
+function temporalAsEpochMs(type: string, el: SQLQuery): SQLQuery | undefined {
+  switch (type) {
+    case 'date':
+    case 'time':
+    case 'timestamp':
+    case 'timestamptz':
+      return sql`EXTRACT(EPOCH FROM ${el}) * 1000`;
+    case 'timetz':
+      // EXTRACT(EPOCH FROM timetz) is negative for a time before UTC midnight
+      // with a positive offset; wrap into 0..86400000 as `selectIdent` does.
+      return sql`((EXTRACT(EPOCH FROM ${el}) * 1000)::bigint + 86400000) % 86400000`;
+    default:
+      return undefined;
+  }
 }
 
 /**
@@ -767,6 +865,12 @@ function jsonPathLeaf(
  * - `IN`/`NOT IN` with a `null` literal is constant-false, as in the
  *   in-memory predicate (the generic forms would assert, or match every
  *   non-null leaf).
+ * - A literal no leaf can share ({@link jsonLeafType}: an empty list, or one
+ *   of the wrong shape for the operator, e.g. an object bound from a static
+ *   parameter) compiles to the predicate's constant answer: `IS` never
+ *   matches and `IS NOT` always does; a positive operator never matches and a
+ *   negated one matches every non-null leaf (SQL's `NOT (x = ANY('{}'))` would
+ *   also match a NULL leaf).
  * - `=`/`IN` against a string or boolean literal compare the leaf *as jsonb*:
  *   jsonb equality is type-strict by itself (`"42"` never equals `42`, a JSON
  *   `null` never equals a string) and a missing key is SQL NULL, so the
@@ -775,14 +879,12 @@ function jsonPathLeaf(
  *   predicate. Numbers keep the gated `double precision` form: jsonb compares
  *   numbers exactly (`numeric`), which would diverge from the client's and
  *   SQLite's IEEE-754 equality above 2^53 or beyond double precision.
- * - An empty `NOT IN` list matches every non-null leaf: SQL's
- *   `NOT (x = ANY('{}'))` is TRUE even for a NULL leaf, whereas the
- *   predicate's null guard excludes it.
- * - The LIKE family compares text, so the leaf must be a string whatever the
- *   literal's type, and the pattern is the literal's text form — as in the
- *   in-memory predicate (`String(pattern)`) and SQLite. Deriving the leaf type
- *   from a numeric or boolean literal instead would cast the leaf to
- *   `double precision`/`boolean` and hand Postgres a LIKE it cannot execute.
+ * - The LIKE family compares text: `simple()` passes the pattern in its text
+ *   form ({@link jsonComparisonLiteral}), so {@link jsonLeafType} requires a
+ *   string leaf whatever the literal's type — as in the in-memory predicate
+ *   and SQLite. Deriving the leaf type from a numeric or boolean literal
+ *   instead would cast the leaf to `double precision`/`boolean` and hand
+ *   Postgres a LIKE it cannot execute.
  * - The negated operators (`!=`, `NOT LIKE`, `NOT ILIKE`, `NOT IN`): the gate
  *   makes a mismatched leaf SQL NULL, which a positive comparison correctly
  *   excludes — but NULL also excludes under a negated operator, where a
@@ -797,58 +899,37 @@ function jsonPathCondition(
   condition: SimpleCondition,
   table: Table,
 ): SQLQuery | undefined {
-  const {op} = condition;
-  let {right} = condition;
-  if (
-    (op === 'IN' || op === 'NOT IN') &&
-    right.type === 'literal' &&
-    right.value === null
-  ) {
-    return sql`false`;
+  const {op, right} = condition;
+  if (right.type !== 'literal') {
+    // The generic rendering rejects an unbound static parameter.
+    return undefined;
   }
-  if (
-    isLikeOperator(op) &&
-    right.type === 'literal' &&
-    right.value !== null &&
-    !Array.isArray(right.value)
-  ) {
-    right = {type: 'literal', value: String(right.value)};
+  if (right.value === null) {
+    // Against any other operator the generic NULL comparison agrees.
+    return op === 'IN' || op === 'NOT IN' ? sql`false` : undefined;
+  }
+  const t = jsonLeafType(op, right.value);
+  if (t === undefined) {
+    if (op === 'IS' || op === 'IS NOT') {
+      return op === 'IS' ? sql`false` : sql`true`;
+    }
     if (!isNegatedOperator(op)) {
-      return sql`${valueComparison(
-        spec,
-        left,
-        table,
-        right,
-        false,
-      )} ${sql.__dangerous__rawValue(op)} ${valueComparison(
-        spec,
-        right,
-        table,
-        left,
-        false,
-      )}`;
+      return sql`false`;
     }
+    const {raw} = jsonPathParts(spec, left, table);
+    return sql`${raw} IS NOT NULL`;
   }
-  if ((op === '=' || op === 'IN') && right.type === 'literal') {
-    const t = leafType(right);
-    if (t === 'string' || t === 'boolean') {
-      const {value} = jsonPathParts(spec, left, table);
-      const lit = valueComparison(spec, right, table, left, op === 'IN');
-      return op === 'IN'
-        ? sql`${value} = ANY (ARRAY(SELECT to_jsonb(v) FROM unnest(${lit}) AS v))`
-        : sql`${value} = to_jsonb(${lit})`;
-    }
+  if ((op === '=' || op === 'IN') && (t === 'string' || t === 'boolean')) {
+    const {value} = jsonPathParts(spec, left, table);
+    const lit = valueComparison(spec, right, table, left, op === 'IN');
+    return op === 'IN'
+      ? sql`${value} = ANY (ARRAY(SELECT to_jsonb(v) FROM unnest(${lit}) AS v))`
+      : sql`${value} = to_jsonb(${lit})`;
   }
   if (!isNegatedOperator(op)) {
     return undefined;
   }
-  const t = leafType(right);
   const {raw, jsonType} = jsonPathParts(spec, left, table);
-  if (t === undefined) {
-    // Only an empty NOT IN list reaches here: `!=`/`NOT LIKE` against null
-    // are constant-false through the generic NULL comparison.
-    return op === 'NOT IN' ? sql`${raw} IS NOT NULL` : undefined;
-  }
   const leaf = sql`${raw}::${sql.__dangerous__rawValue(pgTypeForLiteralType(t))}`;
   const plural = op === 'NOT IN';
   const lit = valueComparison(spec, right, table, left, plural);

@@ -650,7 +650,7 @@ test('json path filter: nested path + array index, numeric ordering', () => {
         COALESCE(json_agg(row_to_json("zql_root")), '[]'::json)::text AS "zql_result"
         FROM (SELECT "jsonTable_0"."id" as "id","jsonTable_0"."metadata" as "metadata"
         FROM "jsonTable" AS "jsonTable_0"
-        WHERE (CASE WHEN jsonb_typeof(("jsonTable_0"."metadata" -> $1::text::text) -> 0) = $2::text::text THEN (("jsonTable_0"."metadata" -> $1::text::text) ->> 0)::double precision END) > $3::text::double precision
+        WHERE (CASE WHEN jsonb_typeof(jsonb_path_query_first(("jsonTable_0"."metadata" -> $1::text::text), 'strict $[0]', '{}', true)) = $2::text::text THEN (jsonb_path_query_first(("jsonTable_0"."metadata" -> $1::text::text), 'strict $[0]', '{}', true) #>> '{}')::double precision END) > $3::text::double precision
          
         ORDER BY "jsonTable_0"."id" ASC NULLS FIRST
         ) "zql_root"",

@@ -353,7 +353,7 @@ describe('compiler with PostgreSQL', () => {
   });
 
   test('json path filter: comparisons are type-strict (no cross-type coercion)', async () => {
-    // row5's priority is the *number* 42. `#>>` renders it as the text '42',
+    // row5's priority is the *number* 42. `->>` renders it as the text '42',
     // so an ungated text comparison would match it against the string '42' —
     // unlike the in-memory predicate (42 !== '42') and SQLite (integer ≠ text).
     // The jsonb_typeof gate makes the leaf NULL for a positive comparison...
@@ -474,6 +474,91 @@ describe('compiler with PostgreSQL', () => {
       'row4',
       'row5',
     ]);
+  });
+
+  test('json path filter: LIKE compares a non-string pattern as text', async () => {
+    // As in the in-memory matcher, a number or boolean pattern is matched by
+    // its string form against string leaves only, instead of casting both
+    // sides to double precision/boolean, which Postgres cannot LIKE. (A number
+    // pattern against number leaves is covered in 'ILIKE / IN' above.)
+    expect(await queryDocIds('LIKE', jsonRef('nested', 'zip'), 94110)).toEqual([
+      'row1',
+    ]);
+    expect(await queryDocIds('ILIKE', jsonRef('flagged'), true)).toEqual([]);
+  });
+
+  test('json path filter: an index step on a non-array is null', async () => {
+    // `->` with an integer would read a raw scalar as a one-element array
+    // (`'"a"'::jsonb -> 0` is `"a"`); index segments stay array-only.
+    expect(await queryDocIds('=', jsonRef('tags', 0), 'not-an-array')).toEqual(
+      [],
+    );
+    expect(await queryDocIds('IS', jsonRef('tags', 0), null)).toEqual([
+      'row2',
+      'row3',
+      'row4',
+      'row5',
+    ]);
+    expect(await queryDocIds('IS NOT', jsonRef('priority', 0), null)).toEqual(
+      [],
+    );
+  });
+
+  test('json path filter: temporal array elements compare as epoch milliseconds', async () => {
+    // Zero represents time[]/timetz[] elements as milliseconds (see 'compiled
+    // reads match canonical PG time parsing'); `to_jsonb` would render them
+    // as strings that never equal a number.
+    const timesIds = async (
+      op: SimpleCondition['op'],
+      name: string,
+      index: number,
+      right: LiteralValue,
+    ) => {
+      const sqlQuery = formatPgInternalConvert(
+        compile(serverSchema, schema, {
+          table: 'timesTable',
+          related: [],
+          where: {
+            type: 'simple',
+            op,
+            left: {type: 'json', value: {type: 'column', name}, path: [index]},
+            right: {type: 'literal', value: right},
+          },
+        }),
+      );
+      const rows = extractZqlResult(
+        await pg.unsafe(sqlQuery.text, sqlQuery.values as JSONValue[]),
+      ) as Array<{id: string}>;
+      return rows.map(r => r.id);
+    };
+    expect(await timesIds('=', 'timeWithoutTzArray', 0, 32887654)).toEqual([
+      'row1',
+    ]);
+    expect(await timesIds('!=', 'timeWithoutTzArray', 1, 0)).toEqual([]);
+    expect(await timesIds('=', 'timeWithTzArray', 0, 82800000)).toEqual([
+      'row1',
+    ]);
+    expect(await timesIds('>', 'timeWithTzArray', 1, 0)).toEqual(['row1']);
+  });
+
+  test('an empty NOT IN list never matches NULL', async () => {
+    // SQL's `NOT (x = ANY('{}'))` is TRUE for a NULL x; the in-memory
+    // predicate never matches a null against a value operator.
+    const sqlQuery = formatPgInternalConvert(
+      compile(serverSchema, schema, {
+        table: 'issue',
+        where: {
+          type: 'simple',
+          op: 'NOT IN',
+          left: {type: 'column', name: 'owner'},
+          right: {type: 'literal', value: []},
+        },
+      }),
+    );
+    const rows = extractZqlResult(
+      await pg.unsafe(sqlQuery.text, sqlQuery.values as JSONValue[]),
+    ) as Array<{id: string}>;
+    expect(rows.map(r => r.id).sort()).toEqual(['b', 'c', 'd']);
   });
 
   test('json path filter: equality is served by an expression index', async () => {
