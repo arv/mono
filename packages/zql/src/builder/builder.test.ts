@@ -2398,6 +2398,18 @@ test('bind static parameters: a JSON path leaf re-validates the bound literal', 
   // error or silently dropped elements.
   expect(() => bind('IN', 'mixed')).toThrow(/one type/);
   expect(() => bind('=', 'claims')).toThrow();
+  // The error names the rule, never the bound value: it is auth data (or a
+  // row) and zero-cache logs query errors.
+  const message = (op: SimpleCondition['op'], field: string) => {
+    try {
+      bind(op, field);
+    } catch (e) {
+      return (e as Error).message;
+    }
+    return '';
+  };
+  expect(message('IN', 'mixed')).not.toMatch(/admin/);
+  expect(message('=', 'claims')).not.toMatch(/u1/);
 });
 
 test('empty or - nothing goes through', () => {

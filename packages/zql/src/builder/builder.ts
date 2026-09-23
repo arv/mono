@@ -216,8 +216,13 @@ export function bindStaticParameters(
         // bound after that validation ran, so re-apply it to the bound value:
         // a mixed list from authData then fails here, loudly, instead of as a
         // Postgres cast error or silently dropped elements on the other
-        // engines.
-        v.parse(bound, simpleConditionSchema);
+        // engines. The message names the rule, not the value: the value is
+        // auth data or a row, and valita's own message would embed it.
+        if (!v.is(bound, simpleConditionSchema)) {
+          throw new Error(
+            'A static parameter compared against a JSON path must be bound to a primitive or a list of values of one type',
+          );
+        }
       }
       return bound;
     }
