@@ -117,6 +117,37 @@ test('json path keys and string literals are escaped as JavaScript strings', () 
   );
 });
 
+test('rendered string literals and json path keys evaluate to the same values', () => {
+  const key = "c\\d'e\nf";
+  const ast: AST = {
+    table: 'issue',
+    where: {
+      type: 'simple',
+      left: {
+        type: 'json',
+        value: {type: 'column', name: 'metadata'},
+        path: [key],
+      },
+      op: '=',
+      right: {type: 'literal', value: 'a\\'},
+    },
+  };
+  const code = astToZQL(ast);
+  expect(code).toMatchInlineSnapshot(
+    `".where(({cmp, json}) => cmp(json('metadata', 'c\\\\d\\'e\\nf'), 'a\\\\'))"`,
+  );
+  // The rendered code evaluates back to the same key and value.
+  const args: unknown[] = [];
+  new Function('q', `return q${code}`)({
+    where: (cb: (eb: unknown) => unknown) =>
+      cb({
+        cmp: (...a: unknown[]) => args.push(...a),
+        json: (...a: unknown[]) => a,
+      }),
+  });
+  expect(args).toEqual([['metadata', key], 'a\\']);
+});
+
 test('where condition with non-equality operator', () => {
   const ast: AST = {
     table: 'issue',
