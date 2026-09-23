@@ -53,10 +53,11 @@ export class NameMapper {
 
   /**
    * Maps the column wrapped by a JSON path reference. A JSON path is only
-   * valid on a `json` column — on any other column the SQLite replica's
-   * `json_type()`/`json_extract()` would throw at fetch time and take the
-   * whole client connection down — so a mapper that knows column types
-   * rejects it here, at the query boundary.
+   * valid on a `json` column, so a mapper that knows column types rejects any
+   * other column here, where queries are mapped (the client, zero-server,
+   * permissions). An AST that reaches zero-cache without this mapping (e.g. a
+   * legacy query) is not checked; there the SQLite pushdown reads a value that
+   * is not valid JSON text as NULL rather than throwing.
    */
   jsonColumnName(table: string, src: string): string {
     const dest = this.#getTable(table);
