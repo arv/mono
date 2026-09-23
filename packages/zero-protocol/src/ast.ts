@@ -113,6 +113,51 @@ export function jsonLiteralType(
   }
 }
 
+/**
+ * Whether every element of `list` has the type of its first one. A JSON path
+ * leaf is compared against the type of an `IN`/`NOT IN` list's first element
+ * (see {@link jsonLiteralType}), so such a list must be homogeneous; shared by
+ * `cmp()` and the wire schema.
+ */
+export function isHomogeneousList(list: readonly unknown[]): boolean {
+  return list.every(e => typeof e === typeof list[0]);
+}
+
+/**
+ * The literal a JSON path leaf is compared against under `op`. The LIKE family
+ * matches text, so a number or boolean pattern is matched by its string form
+ * (`String(literal)`, which is how the in-memory LIKE matcher reads it) — and
+ * {@link jsonLeafType} then requires a string leaf. Every engine compiles a
+ * JSON path comparison against this literal so the rule cannot drift.
+ */
+export function jsonComparisonLiteral(
+  op: SimpleOperator,
+  literal: LiteralValue,
+): LiteralValue {
+  return isLikeOperator(op) &&
+    (typeof literal === 'number' || typeof literal === 'boolean')
+    ? String(literal)
+    : literal;
+}
+
+/**
+ * The JS type a JSON leaf must have to be compared under `op` against
+ * `literal` (as returned by {@link jsonComparisonLiteral}), or `undefined` when
+ * no leaf can share it: `null`, an empty list, and a literal of the wrong shape
+ * for the operator — a list under an operator other than `IN`/`NOT IN`, a
+ * scalar under `IN`/`NOT IN`, or an object (e.g. a bound static parameter).
+ * Like a leaf of another type, such a literal is a non-match for a positive
+ * operator and a match for a negated one.
+ */
+export function jsonLeafType(
+  op: SimpleOperator,
+  literal: LiteralValue,
+): 'string' | 'number' | 'boolean' | undefined {
+  return Array.isArray(literal) === (op === 'IN' || op === 'NOT IN')
+    ? jsonLiteralType(literal)
+    : undefined;
+}
+
 const negatedOperators: ReadonlySet<SimpleOperator> = new Set([
   '!=',
   'NOT LIKE',
@@ -234,8 +279,7 @@ function hasHomogeneousJsonInList(c: SimpleCondition): boolean {
   if (!Array.isArray(value)) {
     return true;
   }
-  const list: readonly (string | number | boolean)[] = value;
-  return list.every(e => typeof e === typeof list[0]);
+  return isHomogeneousList(value);
 }
 
 export const simpleConditionSchema: v.Type<SimpleCondition> = v
@@ -440,7 +484,11 @@ export type ColumnReference = {
  * - **Comparison is type-strict.** A leaf whose JSON type differs from the
  *   literal's is never equal: a non-match for a positive operator, a match for a
  *   negated one (`!=`, `NOT IN`, `NOT LIKE`, `NOT ILIKE`), and never an error.
- *   Only scalar leaves are comparable.
+ *   Only scalar leaves are comparable. The LIKE family matches text: its
+ *   pattern is the literal's string form and the leaf must be a string
+ *   ({@link jsonComparisonLiteral}). A literal no leaf can share — an empty
+ *   list, or one of the wrong shape for the operator — is treated like a
+ *   mismatched leaf ({@link jsonLeafType}).
  *
  * A path references a value inside a single column; it never crosses tables.
  * Because a path-extracted value is not a stored/indexed column, it can never

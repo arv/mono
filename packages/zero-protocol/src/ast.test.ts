@@ -1112,7 +1112,8 @@ test('json path: IN lists must be homogeneous; json refs must wrap json columns'
     }),
   ).toThrow(/one type/);
   // A plain column's list is not restricted (its type is the column's, and
-  // `cmp()` only checks json() references), as before JSON paths existed.
+  // `cmp()` only checks json() references), as before JSON paths existed:
+  // older clients, stored CVR queries and deployed permissions may hold one.
   expect(() =>
     astSchema.parse({
       table: 'issue',

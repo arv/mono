@@ -1,6 +1,7 @@
 /* oxlint-disable @typescript-eslint/no-explicit-any */
 import {must} from '../../../shared/src/must.ts';
 import {
+  isHomogeneousList,
   isValidJsonPathIndex,
   MAX_JSON_PATH_INDEX,
   toStaticParam,
@@ -343,8 +344,7 @@ export function cmp(
   ) {
     // The engines compare a JSON leaf against the type of the list's first
     // element (see jsonLiteralType); a mixed list has no consistent meaning.
-    const t = typeof actualValue[0];
-    if (!actualValue.every(v => typeof v === t)) {
+    if (!isHomogeneousList(actualValue)) {
       throw new Error(
         `${op} against a JSON path requires a list of values of one type`,
       );

@@ -1,8 +1,8 @@
 import {assert, unreachable} from '../../../shared/src/asserts.ts';
 import {
-  isLikeOperator,
   isNegatedOperator,
-  jsonLiteralType,
+  jsonComparisonLiteral,
+  jsonLeafType,
   type Condition,
   type SimpleCondition,
   type SimpleOperator,
@@ -136,10 +136,12 @@ export function createPredicate(
     // positive operator and a match for a negated one — and never an error.
     // This keeps `compareValues` and the LIKE matcher (which assume operands
     // of one type) from throwing on user data. The LIKE family compares text,
-    // so it requires a string leaf whatever the literal's type.
-    const requiredType = isLikeOperator(condition.op)
-      ? 'string'
-      : jsonLiteralType(right.value);
+    // so it requires a string leaf whatever the literal's type (the matcher
+    // reads the pattern as `String(literal)`, as jsonComparisonLiteral does).
+    const requiredType = jsonLeafType(
+      condition.op,
+      jsonComparisonLiteral(condition.op, right.value),
+    );
     const negated = isNegatedOperator(condition.op);
     const {name} = left.value;
     const {path} = left;
@@ -148,8 +150,9 @@ export function createPredicate(
       if (lhs === null || lhs === undefined) {
         return false;
       }
-      // An empty IN/NOT IN list has no type to be strict about: `IN ()` never
-      // matches and `NOT IN ()` always does (for a non-null leaf).
+      // An empty IN/NOT IN list, or a literal of the wrong shape for the
+      // operator, has no type to be strict about: `IN ()` never matches and
+      // `NOT IN ()` always does (for a non-null leaf).
       if (requiredType === undefined || typeof lhs !== requiredType) {
         return negated;
       }
